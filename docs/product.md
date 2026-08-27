@@ -42,8 +42,20 @@ The v1 command set is a core subset, chosen so that `redis-cli` and
 | Expiry       | `EXPIRE` `TTL` `PERSIST` `SET key val EX n`                |
 | Ops          | `INFO`, reporting per-shard key counts and per-loop connection counts |
 
-`COMMAND` has to exist even if it only returns an empty array: recent
-`redis-cli` sends `COMMAND DOCS` on connect and hangs without a reply.
+`COMMAND` is implemented, returning an empty array, for client compatibility.
+
+It is sometimes said that a recent `redis-cli` sends `COMMAND DOCS` on connect
+and hangs without a reply. That claim is not in the official documentation, and
+testing it here did not reproduce it: with `COMMAND` answered as an unknown
+command, `redis-cli` 7.0.15 connected and ran commands normally, over a piped
+session and a single command alike. `COMMAND` is kept because it costs nothing
+and clients may reasonably ask for it -- not because anything is known to break
+without it. A genuinely interactive session on a terminal, where the client
+fetches syntax hints, was not exercised and remains the one case that could
+still behave differently.
+
+`redis-benchmark` prints `WARNING: Could not fetch server CONFIG` and then runs
+normally. `CONFIG` is outside the v1 command set; the warning is cosmetic.
 
 Candidates for v2, if time allows: `SETNX`, `SETEX`, `KEYS`, `SCAN`,
 `RANDOMKEY`, and the hash type (`HSET` / `HGET` / `HDEL`).

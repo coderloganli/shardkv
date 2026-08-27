@@ -109,6 +109,35 @@ these are the details that get written wrong without checking: what `INCR`
 returns for a non-numeric value, that `GET` on a missing key returns `$-1`
 rather than an empty string, that `DEL` returns a count.
 
+### An unknown command is an error reply, never a hang
+
+Every command outside the implemented set is answered with
+`-ERR unknown command 'X'`. The connection stays open and no bytes are left
+unread.
+
+This is not merely tidy: it is the protocol's documented downgrade path. The RESP
+specification has clients open a session with `HELLO <version>`, and states that
+a client detects a server that only speaks RESP2 by receiving
+`-ERR unknown command 'HELLO'` and carrying on in RESP2. `HELLO` is therefore not
+a command this server needs to implement, but it is one it must *refuse
+correctly* — a server that hangs, closes, or silently ignores it fails the
+handshake instead of declining it.
+
+`COMMAND` is implemented rather than refused, returning an empty array. It is
+cheap, and clients may ask for command metadata.
+
+**The command name is escaped before it is quoted back.** An error reply is a
+simple error, which is line-delimited, and the name in it came from the client
+— a bulk string, so it may contain any byte at all. Echoing it raw is
+response-line injection: `*1\r\n$14\r\nBAD\r\n+INJECTED\r\n` is a legal
+request whose name would end the error line early and let the sender dictate
+the bytes the client reads as its next reply. Every byte outside printable
+ASCII becomes `\xHH`, and the echo is capped at 128 bytes.
+
+The general rule this is an instance of: **client bytes may be returned inside
+a bulk string, which is length-framed, but never inside a simple string or a
+simple error, which are terminated by the first CRLF.**
+
 ### The parser is a pure function
 
 **This is a hard requirement, not a preference.** Bytes in; out comes either a
@@ -133,8 +162,16 @@ in production, so ownership is made structural rather than remembered.
 Each connection owns one read buffer and one write buffer, reused across
 requests. They grow when they must and are compacted when the consumed prefix
 gets large, rather than being reallocated per request. On the common path - a
-single-key command that lands on the local shard - a request causes no heap
-allocation at all.
+single-key command that lands on the local shard - a steady-state request causes
+no heap allocation at all.
+
+As with expiry, this lands in two parts. The buffers are reused from the start;
+**compaction of the consumed prefix, and the backpressure watermarks below,
+arrive later with the rest of the resource management.** Until then a buffer only
+ever grows, so a long-lived connection issuing many commands holds a read buffer
+as large as its largest burst, and a client that never reads its replies grows
+the write buffer without bound. Both are known gaps of that interval, not
+oversights.
 
 ### Backpressure
 
@@ -162,12 +199,22 @@ the standard library first, a hand-written open-addressing table later if the
 measurements justify it. Writing the replacement without a baseline to compare
 it against would produce a table with no story attached.
 
-**Values.** Strings, with integers stored in a form that lets `INCR` avoid
-reparsing on every operation.
+**Values.** Byte strings, and only byte strings. `INCR` parses the stored text
+and formats the result back. Caching an integer representation alongside the
+string is an obvious optimisation and is deliberately not taken in v1 — see the
+decision record, which is the same argument as for the hash table: the
+optimisation is cheap to add once a profile asks for it, and the correctness
+traps it introduces (`SET k 001` must still `GET` as `001`) are expensive to find.
 
 **Expiry.** Lazy plus sampled: an expired key is dropped when it is next
 accessed, and a background sample per loop clears keys that are never touched
 again. Lazy alone leaks memory for keys nobody reads.
+
+The two halves land separately. The lazy half ships with the expiry commands;
+the sampling half comes later, with the rest of the resource management. Until
+it does, **an expired key that is never accessed again is never freed** — a known
+and accepted gap, not an oversight. `Value` carries its expiry deadline from the
+start so that closing the gap does not change the data structure.
 
 **Eviction.** LRU is roadmap, not v1.
 
@@ -190,10 +237,37 @@ permanently-registered writable socket spins the event loop. It is registered
 only when a `write()` comes up short and deregistered as soon as the buffer
 drains.
 
+**The build environment is the container, not the developer's machine.** The
+repository carries a `Dockerfile` with the toolchain, CMake and `redis-tools`;
+the suite, the sanitizer builds and the manual protocol checks all run inside it,
+so that a result here and a result in CI are the same statement rather than two
+that happen to agree. The reasoning is in `docs/adr/`.
+
 **Sanitizers are part of the build matrix, not an occasional check.** CI builds
 three ways on `ubuntu-latest`: Release for benchmarking and regressions, Debug
 with ASan and UBSan for memory and undefined behaviour, and Debug with TSan for
 data races.
+
+The TSan build is wired up while the server is still single-threaded, where it
+has nothing to find. That is deliberate: the threading work then lands into a
+pipeline that already reports races, rather than being written for days and
+audited afterwards.
+
+**Running the TSan build needs two accommodations**, both already made, and both
+recorded here because they look like broken tooling the first time they are met.
+ThreadSanitizer requires a particular address-space layout and refuses to start
+when mmap randomisation uses the 32 bits of entropy that Ubuntu 24.04 kernels
+default to — the symptom is `FATAL: ThreadSanitizer: unexpected memory mapping`
+before any test runs. So:
+
+- CMake runs the test binaries under `setarch -R` for the thread build only. It
+  is attached as `CROSSCOMPILING_EMULATOR` rather than `gtest_discover_tests`'s
+  `LAUNCHER`, because discovery also executes the binary, to enumerate cases,
+  and `LAUNCHER` does not cover that run.
+- `setarch -R` calls `personality()`, which Docker's default seccomp profile
+  blocks, so the thread build needs `--security-opt seccomp=unconfined`. CI has
+  no such profile and instead lowers `vm.mmap_rnd_bits` directly, which is the
+  sturdier fix where it is available.
 
 TSan is the important one. The correctness of this architecture rests entirely
 on the premise that no two threads touch the same data, and TSan is the only

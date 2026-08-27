@@ -5,10 +5,11 @@ A concurrent in-memory key-value store in C++20, speaking the Redis wire protoco
 keyspace partitioned across those cores, and no global lock anywhere on the
 request path.
 
-> **Status: work in progress.** The design is settled; the implementation has not
-> started. There are no performance numbers here yet, and there will not be any
-> until they have actually been measured on a named machine with a reproducible
-> script.
+> **Status: work in progress.** The single-threaded server is written and its
+> command set works against a real `redis-cli`. The part the project is actually
+> about -- one event loop per core, the keyspace sharded across them -- is not
+> built yet. There are no performance numbers here, and there will not be any
+> until they have been measured on a named machine with a reproducible script.
 
 ## The idea
 
@@ -78,11 +79,47 @@ systems work, not to reimplement a database.
 
 ## Building
 
-Requires a C++20 compiler, CMake, and Linux (epoll, `SO_REUSEPORT`, eventfd).
+Requires Linux: epoll, `SO_REUSEPORT` and eventfd have no portable equivalents
+and the design rests on all three.
 
 ```
 cmake -B build && cmake --build build && ctest --test-dir build
+./build/shardkv --port 6380
+redis-cli -p 6380 PING
 ```
+
+Port 6380 rather than 6379, so a real `redis-server` can run alongside as the
+control group.
+
+There is a `Dockerfile` carrying the toolchain and `redis-tools`, which is how
+this is developed and how CI runs:
+
+```
+docker build -t shardkv-dev .
+docker run --rm -v "$PWD":/src -w /src shardkv-dev   bash -c 'cmake -B build && cmake --build build && ctest --test-dir build'
+```
+
+Sanitizer builds are selected with `-DSHARDKV_SANITIZER=address` or `=thread`.
+The thread build additionally needs `--security-opt seccomp=unconfined` under
+Docker; `docs/architecture.md` says why.
+
+## Known limitations
+
+Beyond the deliberate omissions above, these are gaps of the current state
+rather than of the design, and each closes in a later step:
+
+- **An expired key that is never accessed again is never freed.** Expiry is
+  lazy; the background sampling that would reap untouched keys is not written
+  yet, and `DBSIZE` counts such keys.
+- **Buffers only grow.** A connection holds a read buffer as large as its
+  largest burst, and a client that never reads its replies grows the write
+  buffer without bound. Compaction and backpressure watermarks come with the
+  resource-management work.
+- **`CONFIG` is not implemented**, so `redis-benchmark` prints
+  `WARNING: Could not fetch server CONFIG` before running normally.
+- **Only one shard.** `--shards` exists and accepts 1; any other value is
+  refused rather than silently ignored, because a benchmark labelled
+  `--shards 8` that quietly ran on one loop would be worse than an error.
 
 ## Design notes
 

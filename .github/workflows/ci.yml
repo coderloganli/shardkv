@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release
+            sanitizer: none
+            build_type: Release
+          - name: asan-ubsan
+            sanitizer: address
+            build_type: Debug
+          - name: tsan
+            sanitizer: thread
+            build_type: Debug
+
+    name: ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-13 cmake ninja-build redis-tools
+
+      # ThreadSanitizer rejects the address space when mmap randomisation uses
+      # 32 bits of entropy, which is the default on Ubuntu 24.04 kernels:
+      #   FATAL: ThreadSanitizer: unexpected memory mapping
+      # The build already runs the test binaries under `setarch -R`, but the
+      # runner lets us lower the entropy directly, which is the more robust of
+      # the two and costs nothing here.
+      - name: Make the address space TSan-compatible
+        if: matrix.sanitizer == 'thread'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Configure
+        env:
+          CXX: g++-13
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DSHARDKV_SANITIZER=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+        env:
+          # Halt on the first report rather than continuing with corrupted state.
+          ASAN_OPTIONS: abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1
