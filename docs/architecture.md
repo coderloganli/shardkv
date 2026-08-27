@@ -1,7 +1,14 @@
 # Architecture
 
-Everything below is design. No code exists yet, so treat this as the intended
-shape rather than a description of what is there.
+This describes the finished shape. Part of it is built and part of it is not,
+and the difference matters when reading the rest: **the server today runs one
+loop on one thread with one shard.** Everything about accepting connections,
+parsing, storing and replying is written and tested. Everything about several
+loops — the cross-shard queue, the eventfd wakeups, CPU affinity, the
+scatter/gather multi-key commands — is designed here but not yet implemented.
+
+The pieces that exist were built in the shape the rest needs, so what comes
+next is constructing N of them rather than rewriting these.
 
 ## What this is
 
