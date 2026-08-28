@@ -78,6 +78,12 @@ was chosen.
   is on the roadmap if time allows.
 - **Replication.** No primary/replica, no `REPLICAOF`.
 - **Transactions and scripting.** No `MULTI` / `EXEC`, no Lua.
+- **Atomic multi-key writes across shards.** Redis applies an `MSET` as one
+  indivisible step. Here, keys belonging to different cores are written at
+  different moments, so a concurrent reader can observe part of an `MSET` and
+  not the rest. Single-key commands are unaffected, and an `MSET` whose keys
+  happen to share a shard is applied together — but that is a coincidence of
+  hashing, not a guarantee, and should not be relied on.
 - **Pub/Sub, Streams, and Cluster-family commands.**
 - **A complete command set.** The table above is the whole surface.
 

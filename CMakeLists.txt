@@ -24,6 +24,9 @@ add_library(shardkv_lib
   src/net/listener.cc
   src/net/connection.cc
   src/net/loop.cc
+  src/net/loop_router.cc
+  src/net/reply_slots.cc
+  src/net/server.cc
 )
 target_include_directories(shardkv_lib PUBLIC src third_party)
 shardkv_apply_sanitizers(shardkv_lib)
@@ -67,7 +70,8 @@ if(SHARDKV_SANITIZER STREQUAL "thread")
 endif()
 
 # One binary per area, so a failure names the area before it names the case.
-foreach(area parser encoder store expiry dispatch unique_fd integration)
+foreach(area parser encoder store expiry dispatch unique_fd integration
+                mpsc slots routing sharding)
   add_executable(${area}_test tests/${area}_test.cc)
   target_link_libraries(${area}_test PRIVATE shardkv_lib GTest::gtest_main)
   target_include_directories(${area}_test PRIVATE tests)

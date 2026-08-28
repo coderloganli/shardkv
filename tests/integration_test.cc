@@ -35,7 +35,8 @@ namespace {
 class Server {
  public:
   Server() {
-    loop_ = std::make_unique<Loop>(0, shard_);
+    table_.inboxes.push_back(std::make_unique<Inbox>());
+    loop_ = std::make_unique<Loop>(0, shard_, 0, table_, /*pin=*/false);
     port_ = loop_->port();
     thread_ = std::thread([this] { loop_->run(); });
   }
@@ -50,6 +51,7 @@ class Server {
  private:
   SteadyClock clock_;
   Shard shard_{clock_};
+  LoopTable table_;
   std::unique_ptr<Loop> loop_;
   std::thread thread_;
   std::uint16_t port_ = 0;
@@ -91,41 +93,30 @@ class Client {
     }
   }
 
-  // Reads until exactly n bytes have arrived, or the peer closes.
+  // Everything below reads through one buffer that persists across calls. A
+  // read that needs a line can otherwise pull in bytes belonging to the next
+  // reply and discard them, leaving the following read waiting for bytes it has
+  // already been handed.
   std::string receive(std::size_t n) {
-    std::string out;
-    char buf[4096];
-    while (out.size() < n) {
-      const ssize_t got = ::recv(fd_, buf, sizeof(buf), 0);
-      if (got <= 0) break;
-      out.append(buf, static_cast<std::size_t>(got));
+    while (buffer_.size() < n && fill()) {
     }
-    return out;
+    return take(std::min(n, buffer_.size()));
   }
 
-  // Reads whatever is there until the peer closes.
   std::string receiveUntilClosed() {
-    std::string out;
-    char buf[4096];
-    for (;;) {
-      const ssize_t got = ::recv(fd_, buf, sizeof(buf), 0);
-      if (got <= 0) break;
-      out.append(buf, static_cast<std::size_t>(got));
+    while (fill()) {
     }
-    return out;
+    return take(buffer_.size());
   }
 
-  // Reads until the marker appears, for replies whose length is not known in
-  // advance.
+  // Up to and including the first occurrence of the marker.
   std::string receiveUntilContains(std::string_view marker) {
-    std::string out;
-    char buf[4096];
-    for (int i = 0; i < 100 && out.find(marker) == std::string::npos; ++i) {
-      const ssize_t got = ::recv(fd_, buf, sizeof(buf), 0);
-      if (got <= 0) break;
-      out.append(buf, static_cast<std::size_t>(got));
+    while (buffer_.find(marker) == std::string::npos) {
+      if (!fill()) break;
     }
-    return out;
+    const auto at = buffer_.find(marker);
+    if (at == std::string::npos) return take(buffer_.size());
+    return take(at + marker.size());
   }
 
   bool peerClosed() {
@@ -143,21 +134,60 @@ class Client {
   int fd() const { return fd_; }
 
  private:
+  bool fill() {
+    char buf[8192];
+    const ssize_t got = ::recv(fd_, buf, sizeof(buf), 0);
+    if (got <= 0) return false;
+    buffer_.append(buf, static_cast<std::size_t>(got));
+    return true;
+  }
+
+  std::string take(std::size_t n) {
+    std::string out = buffer_.substr(0, n);
+    buffer_.erase(0, n);
+    return out;
+  }
+
   int fd_ = -1;
+  std::string buffer_;
 };
 
-// Reads one numeric field out of INFO, over a connection of its own. Returns
-// -1 if the field is absent, so a caller's comparison fails loudly.
-long long infoField(std::uint16_t port, const std::string& name) {
-  Client probe(port);
-  probe.send("INFO\r\n");
-  const std::string info = probe.receiveUntilContains(name + ":");
+// Reads a complete RESP bulk string reply: the $<len> header, then exactly that
+// many bytes plus the trailing CRLF.
+//
+// Reading until a marker appears is a framing assumption dressed up as a read:
+// it works only when the recv that carries the marker happens to carry the
+// value and its CRLF too. The length is in the protocol.
+std::string readBulkReply(Client& c) {
+  const std::string line = c.receiveUntilContains("\r\n");
+  if (line.size() < 3 || line[0] != '$') {
+    ADD_FAILURE() << "not a bulk reply: " << line;
+    return line;
+  }
+  const long long length = std::stoll(line.substr(1, line.size() - 3));
+  if (length < 0) return line;  // $-1, a missing value
+  return line + c.receive(static_cast<std::size_t>(length) + 2);
+}
+
+std::string infoOf(Client& c) {
+  c.send("INFO\r\n");
+  return readBulkReply(c);
+}
+
+long long fieldOf(const std::string& info, const std::string& name) {
   const auto at = info.find(name + ":");
   if (at == std::string::npos) return -1;
   const auto start = at + name.size() + 1;
   const auto eol = info.find("\r\n", start);
   if (eol == std::string::npos) return -1;
   return std::stoll(info.substr(start, eol - start));
+}
+
+// Reads one numeric field out of INFO, over a connection of its own. Returns
+// -1 if the field is absent, so a caller's comparison fails loudly.
+long long infoField(std::uint16_t port, const std::string& name) {
+  Client probe(port);
+  return fieldOf(infoOf(probe), name);
 }
 
 std::size_t openFdCount() {
@@ -383,24 +413,17 @@ TEST(Integration, InfoReportsLiveConnectionCount) {
   Server server;
   Client first(server.port());
 
-  first.send("INFO\r\n");
-  std::string reply = first.receiveUntilContains("loop0_connections:");
-  EXPECT_NE(reply.find("loop0_connections:1\r\n"), std::string::npos) << reply;
+  EXPECT_EQ(fieldOf(infoOf(first), "loop0_connections"), 1);
 
   {
     Client second(server.port());
     second.send("PING\r\n");
     ASSERT_EQ(second.receive(7), "+PONG\r\n");  // ensure it is accepted first
-
-    first.send("INFO\r\n");
-    reply = first.receiveUntilContains("loop0_connections:");
-    EXPECT_NE(reply.find("loop0_connections:2\r\n"), std::string::npos) << reply;
+    EXPECT_EQ(fieldOf(infoOf(first), "loop0_connections"), 2);
   }
 
   std::this_thread::sleep_for(200ms);  // let the loop reap the closed one
-  first.send("INFO\r\n");
-  reply = first.receiveUntilContains("loop0_connections:");
-  EXPECT_NE(reply.find("loop0_connections:1\r\n"), std::string::npos) << reply;
+  EXPECT_EQ(fieldOf(infoOf(first), "loop0_connections"), 1);
 }
 
 // The SIGPIPE protection, tested where it can actually be pinned down.
@@ -429,7 +452,8 @@ TEST(ConnectionTest, WriteToDepartedPeerIsAnErrorNotASignal) {
   SteadyClock clock;
   Shard shard(clock);
   LoopStats stats;
-  Connection connection(UniqueFd(fds[0]), shard, stats);
+  shardkv::testing::LocalOnlyRouter router(shard);
+  Connection connection(UniqueFd(fds[0]), router, stats, /*id=*/1);
 
   // Reads the queued command, answers it, and writes to the dead peer.
   EXPECT_FALSE(connection.onReadable()) << "the connection should report itself finished";
