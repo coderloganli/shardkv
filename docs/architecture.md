@@ -1,21 +1,20 @@
 # Architecture
 
-This describes the finished shape. Part of it is built and part of it is not,
-and the difference matters when reading the rest: **the server today runs one
-loop on one thread with one shard.** Everything about accepting connections,
-parsing, storing and replying is written and tested. Everything about several
-loops — the cross-shard queue, the eventfd wakeups, CPU affinity, the
-scatter/gather multi-key commands — is designed here but not yet implemented.
-
-The pieces that exist were built in the shape the rest needs, so what comes
-next is constructing N of them rather than rewriting these.
-
 ## What this is
 
 One process, one port, `N` threads where `N` is the core count. Each thread owns
 an epoll instance, a set of TCP connections, and one shard of the keyspace. The
-thread that owns a shard is the only thread permitted to touch it. Threads share
-no mutable state; the only channel between them is a message queue.
+thread that owns a shard is the only thread permitted to touch it, and the only
+channel between threads is a message queue.
+
+**Stated precisely, because the imprecise version is the interesting claim and
+it is false:** no *data* is shared. Keys, values, connections, buffers and reply
+slots each belong to exactly one thread for their whole lifetime, and nothing on
+the request path is reachable from two threads at once. What is shared is the
+message queues themselves and a single flag saying the server is shutting down —
+lifecycle machinery, not state that a command reads or writes. Saying "threads
+share no mutable state" would be a cleaner sentence and would not survive
+someone reading the shutdown path.
 
 The repository is responsible for the server and nothing else. There is no
 client library, no cluster coordinator, no admin tool.
@@ -29,10 +28,10 @@ client library, no cluster coordinator, no admin tool.
                     +--------------------------------------+
                         |           |           |
                 +-------+---+ +-----+-----+ +---+-------+
-                |  Loop 0   | |  Loop 1   | | Loop N-1  |  one thread per core,
-                |  epoll    | |  epoll    | |  epoll    |  pinned by CPU affinity
-                |  conns    | |  conns    | |  conns    |
-                |  Shard 0  | |  Shard 1  | | Shard N-1 |  1/N of the keyspace
+                |  Loop 0   | |  Loop 1   | | Loop N-1  |  one thread per shard
+                |  epoll    | |  epoll    | |  epoll    |  (--pin adds CPU
+                |  conns    | |  conns    | |  conns    |   affinity; off by
+                |  Shard 0  | |  Shard 1  | | Shard N-1 |   default) 1/N of keys
                 +-----------+ +-----------+ +-----------+
                       ^   |         ^   |        ^   |
                       |   +---------+---+--------+---+
@@ -49,13 +48,21 @@ Each loop owns exclusively:
 ### Accepting connections
 
 Every loop independently creates a socket, sets `SO_REUSEPORT`, binds and
-listens on the same port. The kernel hashes each incoming connection's 4-tuple
-and hands it to one of the listening sockets. There is no accept thread and no
-handoff: a connection is born on the loop that will serve it for its whole life.
+listens on the same port. The kernel hands each incoming connection to one of
+those listening sockets. There is no accept thread and no handoff: a connection
+is born on the loop that will serve it for its whole life, which is why
+connections never migrate.
 
-This is why connections never migrate. It also means connection distribution is
-the kernel's business, and can be uneven for a small number of clients - with
-`redis-benchmark -c 50` it evens out.
+**How the kernel chooses is not something this design controls, or should
+assume.** `socket(7)` promises only that `SO_REUSEPORT` improves `accept(2)`
+load distribution; it documents no algorithm, and the assignment can be
+redefined outright with a BPF program. An earlier version of this document
+asserted a 4-tuple hash -- a common description, but not one the manual makes.
+Nothing here rests on it and no test asserts an even spread.
+
+What the design relies on is weaker and is guaranteed: a connection is accepted
+by exactly one loop and stays there. Uneven distribution costs throughput, not
+correctness.
 
 ### Key to shard
 
@@ -71,24 +78,67 @@ therefore about 1/N for uniformly distributed keys.
 
 `GET foo`, with the connection on Loop 2 and `foo` belonging to Shard 5:
 
-1. Loop 2's epoll reports the connection readable.
-2. Bytes are read into the connection's own reusable read buffer. No allocation.
-3. The RESP parser parses in place. The key and value it produces are
-   `string_view`s into that read buffer - nothing is copied.
-4. `hash("foo") % N` is 5, which is not this loop's shard.
-5. A cross-shard request message is built. **The key is copied here**, because
-   the read buffer may be reused before the response comes back. The message is
-   pushed onto Loop 5's MPSC queue and its eventfd is written to wake it.
-6. Loop 5 wakes, takes the request off its queue, looks the key up in the hash
-   table it exclusively owns - no lock - and pushes the result onto Loop 2's
-   return queue, waking Loop 2.
-7. Loop 2 encodes the result as RESP into the connection's write buffer.
-8. It attempts `write()` directly. If the write comes up short, it registers
-   `EPOLLOUT` and sends the remainder when the socket is writable.
+1. Loop 2's epoll reports the connection readable; bytes go into that
+   connection's reusable read buffer, with no allocation.
+2. The parser works in place. The key and value it yields are `string_view`s
+   into that buffer — nothing is copied yet.
+3. `hash("foo") % N` is 5, so this is not the local shard.
+4. A request message is built, and **the key is copied here**, because the read
+   buffer may be reused before the reply comes back. It goes onto Loop 5's
+   queue, and Loop 5's eventfd is written only if that queue was empty.
+5. Loop 5 wakes, drains its queue, looks the key up in the table it exclusively
+   owns — no lock — and sends the encoded reply back to Loop 2's queue.
+6. Loop 2 fills the waiting slot and writes out the longest ready run, as
+   described below.
 
-Had `foo` belonged to Shard 2, step 4 would be followed directly by the lookup,
+Had `foo` belonged to Shard 2, step 3 would be followed straight by the lookup,
 the encode and the write: **no thread crossed, no lock taken, no allocation
 made.**
+
+### Replies leave in order, whatever order they arrive in
+
+RESP has no request identifiers: a client matches replies to commands by
+position alone. But a pipelined run can mix local commands, which finish at
+once, with cross-shard ones, which finish after a round trip — so replies
+become ready out of order and must still go out in order.
+
+Each connection therefore owns a queue of reply slots. Parsing a command
+reserves a slot; a local command fills it immediately, a cross-shard one leaves
+it empty until its reply returns. The connection writes out the longest filled
+run from the front and stops at the first gap. Parsing does not pause for a gap,
+so pipelining keeps working, and the stall is confined to the one connection
+that caused it.
+
+Slots never cross a thread. A cross-shard request goes to the owning loop, which
+answers it against its own shard and sends the reply *back* to the originating
+loop, and that loop fills the slot. Messages address a connection by an
+identifier rather than a pointer, and identifiers are never reused: a reply for
+a connection that has since closed is simply dropped, which is why a dying
+connection never has to wait for replies still in flight toward it.
+
+### A loop can only reach its own shard
+
+Command execution goes through a `ShardRouter`, whose only accessor for a shard
+is `local()`; everything else is a `send()`. So the rule that a thread touches
+only its own partition is enforced by the type rather than by reviewers
+remembering it, and because the interface is abstract, the ordering rules above
+are testable with no threads and no sockets. See
+`docs/adr/0008-routing-is-an-interface-so-ordering-can-be-tested.md`.
+
+### Multi-key commands scatter and gather
+
+`MGET`, `MSET`, `DEL` and `EXISTS` group their keys by shard, send one message
+per remote group, and reassemble. **The reply is assembled by the arguments'
+original positions, not by the order the groups came back in** — `MGET a b c`
+answers about `a`, `b` and `c` in that order however the shards were scheduled.
+
+`DBSIZE`, `FLUSHDB` and `INFO` fan out the same way. A `DBSIZE` that reported
+only the local shard would not be slow, it would be wrong.
+
+`INFO` is worth one note: it is itself a cross-shard command, so reading
+`cross_shard_requests` through it adds to the number being read. That is not a
+flaw in the counter -- requests sent are requests sent -- but a measurement
+taken with `INFO` has to allow for the cost of the instrument.
 
 ## Boundaries
 
@@ -167,12 +217,14 @@ in production, so ownership is made structural rather than remembered.
 ### Buffers belong to the connection
 
 Each connection owns one read buffer and one write buffer, reused across
-requests. They grow when they must and are compacted when the consumed prefix
-gets large, rather than being reallocated per request. On the common path - a
-single-key command that lands on the local shard - a steady-state request causes
-no heap allocation at all.
+requests rather than reallocated per request. On the common path -- a single-key
+command that lands on the local shard -- a steady-state request causes no heap
+allocation at all.
 
-As with expiry, this lands in two parts. The buffers are reused from the start;
+**Today they only ever grow.** Compacting a large consumed prefix is designed
+and not built; the buffer is cleared when it drains completely and not
+otherwise. As with expiry, this lands in two parts. The buffers are reused from
+the start;
 **compaction of the consumed prefix, and the backpressure watermarks below,
 arrive later with the rest of the resource management.** Until then a buffer only
 ever grows, so a long-lived connection issuing many commands holds a read buffer
@@ -183,14 +235,25 @@ oversights.
 ### Backpressure
 
 A client that pipelines heavily and never reads its responses will grow the
-write buffer without bound if nothing stops it. Two watermarks do:
+write buffer without bound if nothing stops it. **Nothing does, yet.** The plan
+is two watermarks: above the high one the connection stops being read from, so
+the kernel's receive buffer fills and TCP flow control pushes back on the
+sender; once the write buffer drains below the low one, reading resumes. Two
+rather than one, because a single threshold oscillates.
 
-- above the high watermark, the connection stops being read from. `EPOLLIN` is
-  deregistered, so the kernel's receive buffer fills and TCP flow control pushes
-  back on the sender
-- once the write buffer drains below the low watermark, reading resumes
+That arrives with the rest of the resource management. Until it does, a
+non-reading client is an unbounded write buffer -- listed in the README among
+the known gaps, and visible in `INFO` as a loop's `short_writes` climbing.
 
-Two watermarks rather than one, because a single threshold oscillates.
+### A cross-shard MSET is not atomic
+
+Redis applies an `MSET` as one indivisible step. Here the writes land on
+different threads at different moments, so a concurrent `MGET` can see some of
+them and not others. It follows from the architecture rather than being an
+oversight -- atomicity would need either a lock spanning shards, the very thing
+this design exists to avoid, or a two-phase commit serving one command. Recorded
+as a non-goal in `docs/product.md` and as a limitation in the README, because it
+is the kind of difference that should be volunteered rather than discovered.
 
 ### Cross-shard messages own their keys
 
@@ -213,9 +276,10 @@ decision record, which is the same argument as for the hash table: the
 optimisation is cheap to add once a profile asks for it, and the correctness
 traps it introduces (`SET k 001` must still `GET` as `001`) are expensive to find.
 
-**Expiry.** Lazy plus sampled: an expired key is dropped when it is next
-accessed, and a background sample per loop clears keys that are never touched
-again. Lazy alone leaks memory for keys nobody reads.
+**Expiry.** Lazy today, lazy plus sampled when it is finished. An expired key
+is dropped when it is next accessed; the background sample per loop that would
+clear keys nobody touches again is designed and not built. Lazy alone leaks
+memory for keys nobody reads, which is why the second half is not optional.
 
 The two halves land separately. The lazy half ships with the expiry commands;
 the sampling half comes later, with the rest of the resource management. Until
@@ -230,14 +294,10 @@ to be thread-safe, and none of them are.
 
 ## Conventions that are not obvious from the code
 
-**Level-triggered epoll, not edge-triggered.** ET produces fewer events but
-requires reading until `EAGAIN` every time; one missed read silently wedges a
-connection, and that class of bug is extremely hard to reproduce. LT's "still
-readable, telling you again" semantics tolerate the mistake. With pipelining the
-event-count difference is small, because one read usually yields several
-commands. If profiling later shows LT's event overhead to be material, the read
-path can move to ET with a read-until-`EAGAIN` loop - that is a roadmap item
-with a measurement attached, not a v1 decision.
+**Level-triggered epoll, not edge-triggered.** Getting level-triggered wrong
+costs a redundant wakeup; getting edge-triggered wrong costs a silently wedged
+connection. The reasoning, and the conditions under which ET would be
+reconsidered, are in `docs/adr/0009-level-triggered-epoll-not-edge-triggered.md`.
 
 **`EPOLLOUT` is registered on demand.** It is not held permanently: under LT a
 permanently-registered writable socket spins the event loop. It is registered
@@ -260,29 +320,15 @@ has nothing to find. That is deliberate: the threading work then lands into a
 pipeline that already reports races, rather than being written for days and
 audited afterwards.
 
-**Running the TSan build needs two accommodations**, both already made, and both
-recorded here because they look like broken tooling the first time they are met.
-ThreadSanitizer requires a particular address-space layout and refuses to start
-when mmap randomisation uses the 32 bits of entropy that Ubuntu 24.04 kernels
-default to — the symptom is `FATAL: ThreadSanitizer: unexpected memory mapping`
-before any test runs. So:
+**The TSan build needs two accommodations on modern kernels**, both already made in CMake and CI. They look like broken tooling the first time they are met, so the symptom and the reasons are in `docs/adr/0003-build-and-test-in-a-container.md`.
 
-- CMake runs the test binaries under `setarch -R` for the thread build only. It
-  is attached as `CROSSCOMPILING_EMULATOR` rather than `gtest_discover_tests`'s
-  `LAUNCHER`, because discovery also executes the binary, to enumerate cases,
-  and `LAUNCHER` does not cover that run.
-- `setarch -R` calls `personality()`, which Docker's default seccomp profile
-  blocks, so the thread build needs `--security-opt seccomp=unconfined`. CI has
-  no such profile and instead lowers `vm.mmap_rnd_bits` directly, which is the
-  sturdier fix where it is available.
-
-TSan is the important one. The correctness of this architecture rests entirely
-on the premise that no two threads touch the same data, and TSan is the only
-tool that checks the premise mechanically rather than by inspection. The
-scenarios it must cover are the ones where the premise is most likely to break:
-many clients reading and writing the same keys so that cross-shard traffic is
-generated, connections opening and closing while requests are in flight, and
-shutdown with cross-shard messages still in transit.
+TSan is the one that matters. The correctness of this architecture reduces to a
+single claim -- no two threads touch the same data -- and TSan checks that claim
+mechanically rather than by inspection. It must cover the cases where the claim
+is most likely to break: many clients reading and writing keys that span shards,
+connections opening and closing while requests are in flight, and shutdown with
+messages still in transit. **A race here means a piece of state escaped its
+thread; the answer is to find which one, never to add a mutex.**
 
 **Tests are expected to be able to fail.** Beyond unit tests, the suite includes
 protocol conformance against real client behaviour, and fault injection: a slow
@@ -291,11 +337,11 @@ exhausted `ulimit -n`, and a soak run watched for RSS and fd growth. Error paths
 are covered, not only the happy path.
 
 **Performance numbers are inseparable from their environment.** Every recorded
-figure carries CPU model and core count, kernel version, compiler and
-optimisation level, whether load was generated on the same machine, and whether
-threads were pinned. Measurements live in `benchmarks/` with the script that
-produced them and the raw output, and the expected result is written down before
-the run, so that it is an experiment rather than a demonstration.
+figure carries the machine, kernel, compiler, optimisation level, whether load
+was generated locally and whether threads were pinned; measurements live in
+`benchmarks/` beside the script and raw output, with the expected result written
+down before the run. `docs/product.md` states the principle; this is where it
+lands in practice.
 
 ## Toolchain
 

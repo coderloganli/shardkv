@@ -36,10 +36,9 @@ Listener::Listener(std::uint16_t port) {
     fail("setsockopt(SO_REUSEADDR)");
   }
 
-  // Set now, though with a single listener it changes nothing observable. The
-  // next task gives every loop its own listener on this same port and lets the
-  // kernel hash arriving connections across them; this file should not have to
-  // change for that.
+  // Every loop listens on this same port. Which listener the kernel gives a
+  // connection to is its business and is not documented -- see the note in
+  // listener.h. Uneven distribution costs throughput, not correctness.
   if (::setsockopt(fd_.get(), SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0) {
     fail("setsockopt(SO_REUSEPORT)");
   }

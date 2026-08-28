@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -17,12 +18,19 @@ namespace {
 constexpr std::size_t kReadChunk = 16 * 1024;
 }
 
-Connection::Connection(UniqueFd fd, Shard& shard, LoopStats& stats)
-    : fd_(std::move(fd)), shard_(&shard), stats_(&stats) {}
+Connection::Connection(UniqueFd fd, ShardRouter& router, LoopStats& stats,
+                       std::uint64_t id)
+    : fd_(std::move(fd)), router_(&router), stats_(&stats), id_(id) {}
 
 int Connection::fd() const { return fd_.get(); }
 
 bool Connection::onReadable() {
+  // A terminal slot means this connection is finished: whatever the client
+  // sends after QUIT or a broken frame is not ours to answer, and draining it
+  // into a buffer nobody will read is just somewhere for an unbounded amount of
+  // someone else's data to go. Stop reading, and let the pending replies go out.
+  if (stop_reading_) return onSlotsChanged();
+
   char chunk[kReadChunk];
   for (;;) {
     const ssize_t n = ::recv(fd_.get(), chunk, sizeof(chunk), 0);
@@ -32,11 +40,11 @@ bool Connection::onReadable() {
       // Level-triggered, so there is no obligation to read until EAGAIN: if
       // more is waiting, epoll says so again. One chunk per event keeps one
       // busy connection from starving the others.
-      return flush();
+      return onSlotsChanged();
     }
     if (n == 0) return false;  // peer closed
     if (errno == EINTR) continue;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return flush();
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return onSlotsChanged();
     return false;  // ECONNRESET and friends
   }
 }
@@ -47,6 +55,8 @@ bool Connection::wantsWrite() const { return !write_.empty(); }
 
 bool Connection::drainInput() {
   for (;;) {
+    if (stop_reading_) return true;
+
     // The views parse() fills point into read_. They stay valid only until
     // read_ is next mutated, so everything that must outlive this iteration is
     // copied during dispatch, and the bytes are consumed only afterwards.
@@ -56,28 +66,43 @@ bool Connection::drainInput() {
     if (status == ParseStatus::kNeedMore) return true;
 
     if (status == ParseStatus::kProtocolError) {
+      // A terminal slot, not an immediate write. Earlier commands may still be
+      // out at other shards, and the client is owed their replies first --
+      // letting this jump the queue would break the one ordering guarantee RESP
+      // gives.
+      const std::uint32_t slot = slots_.reserve();
       std::string reply;
       resp::encodeError("ERR Protocol error: invalid request", reply);
-      write_.append(reply);
+      slots_.fill(slot, std::move(reply));
       close_after_flush_ = true;
+      stop_reading_ = true;
       // The stream cannot be resynchronised: the framing is lost, so every
       // later byte would be guesswork.
       return true;
     }
 
-    std::string reply;
-    const AfterCommand after = dispatch(*shard_, argv_, reply, *stats_);
-    write_.append(reply);
+    const std::uint32_t slot = slots_.reserve();
+    const AfterCommand after =
+        dispatch(*router_, slots_, slot, id_, argv_, *stats_);
 
     // Only now, once nothing borrows read_ any more.
     read_.consume(consumed);
 
     if (after == AfterCommand::kClose) {
       close_after_flush_ = true;
+      stop_reading_ = true;
       return true;
     }
     if (read_.empty()) return true;
   }
+}
+
+// Moves whatever is now ready from the slots to the write buffer. The single
+// place that decides what reaches the wire, so the ordering rule is one
+// function rather than an obligation on every command path.
+bool Connection::onSlotsChanged() {
+  slots_.takeReadyPrefix(write_);
+  return flush();
 }
 
 bool Connection::flush() {
@@ -105,7 +130,9 @@ bool Connection::flush() {
     return false;  // the peer is gone; nothing left to do but close
   }
 
-  return !close_after_flush_;
+  // Close only once the terminal slot has actually gone out, and only once
+  // nothing is still outstanding: a reply may yet arrive from another shard.
+  return !(close_after_flush_ && slots_.idle());
 }
 
 }  // namespace shardkv

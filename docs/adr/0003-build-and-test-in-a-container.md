@@ -58,6 +58,24 @@ for an unrelated reason:** it would move the repository out of the project's
 `main/<repo>` workspace layout, which is where the surrounding task tooling
 expects it.
 
+## Running the ThreadSanitizer build
+
+**Running the TSan build needs two accommodations**, both already made, and both
+recorded here because they look like broken tooling the first time they are met.
+ThreadSanitizer requires a particular address-space layout and refuses to start
+when mmap randomisation uses the 32 bits of entropy that Ubuntu 24.04 kernels
+default to — the symptom is `FATAL: ThreadSanitizer: unexpected memory mapping`
+before any test runs. So:
+
+- CMake runs the test binaries under `setarch -R` for the thread build only. It
+  is attached as `CROSSCOMPILING_EMULATOR` rather than `gtest_discover_tests`'s
+  `LAUNCHER`, because discovery also executes the binary, to enumerate cases,
+  and `LAUNCHER` does not cover that run.
+- `setarch -R` calls `personality()`, which Docker's default seccomp profile
+  blocks, so the thread build needs `--security-opt seccomp=unconfined`. CI has
+  no such profile and instead lowers `vm.mmap_rnd_bits` directly, which is the
+  sturdier fix where it is available.
+
 ## Consequence for the performance step
 
 `perf` and flame graphs are constrained inside containers: they need elevated

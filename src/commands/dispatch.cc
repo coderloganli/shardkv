@@ -10,6 +10,12 @@
 #include <string>
 #include <string_view>
 
+#include <map>
+
+#include "commands/router.h"
+#include "net/message.h"
+#include "net/reply_slots.h"
+#include "store/hash.h"
 #include "proto/encoder.h"
 
 namespace shardkv {
@@ -38,6 +44,7 @@ constexpr std::string_view kSyntaxError = "ERR syntax error";
 // practice a deadline in the past, which quietly deletes the key it was asked
 // to preserve.
 constexpr std::int64_t kMaxExpireSeconds = 100LL * 365 * 24 * 60 * 60;
+
 
 std::string lowered(std::string_view s) {
   std::string out(s);
@@ -104,11 +111,15 @@ std::optional<std::int64_t> asCounter(std::string_view s) {
   return value;
 }
 
-std::string formatted(std::int64_t value) {
+}  // namespace
+
+std::string formatDecimal(std::int64_t value) {
   std::array<char, 24> buf{};
   const auto result = std::to_chars(buf.data(), buf.data() + buf.size(), value);
   return std::string(buf.data(), result.ptr);
 }
+
+namespace {
 
 // Checked add. Overflow is an error reply, never a wrap: a counter that silently
 // wraps is worse than one that refuses.
@@ -138,7 +149,7 @@ void applyDelta(Shard& shard, std::string_view key, std::int64_t delta,
   }
 
   // Preserve any TTL: INCR changes the value, not the deadline.
-  const std::string text = formatted(result);
+  const std::string text = formatDecimal(result);
   if (Value* value = shard.lookup(key); value != nullptr) {
     value->data = text;
   } else {
@@ -237,24 +248,28 @@ void infoCommand(Shard& shard, const LoopStats& stats, std::string& out) {
   body += "shardkv_version:0.1.0\r\n";
   body += "shards:1\r\n";
   body += "\r\n# Keyspace\r\n";
-  body += "shard0_keys:" + formatted(static_cast<std::int64_t>(shard.size())) + "\r\n";
+  body += "shard0_keys:" + formatDecimal(static_cast<std::int64_t>(shard.size())) + "\r\n";
   body += "\r\n# Clients\r\n";
   // The live count, supplied by the loop -- a shard holds keys and has never
   // heard of a socket. With one loop this is the only count there is; the name
   // is already indexed so that N loops need no new format.
   body += "loop0_connections:" +
-          formatted(static_cast<std::int64_t>(stats.connections)) + "\r\n";
+          formatDecimal(static_cast<std::int64_t>(stats.connections)) + "\r\n";
   body += "loop0_short_writes:" +
-          formatted(static_cast<std::int64_t>(stats.short_writes)) + "\r\n";
+          formatDecimal(static_cast<std::int64_t>(stats.short_writes)) + "\r\n";
   body += "loop0_peer_gone_writes:" +
-          formatted(static_cast<std::int64_t>(stats.peer_gone_writes)) + "\r\n";
+          formatDecimal(static_cast<std::int64_t>(stats.peer_gone_writes)) + "\r\n";
   resp::encodeBulkString(body, out);
 }
 
+// Executes one command against one shard. Knows nothing about routing,
+// threads or slots -- this is the whole of the single-threaded server's
+// behaviour, unchanged, and both the local path and an arriving cross-shard
+// request go through it.
 }  // namespace
 
-AfterCommand dispatch(Shard& shard, const std::vector<std::string_view>& argv,
-                      std::string& out, const LoopStats& stats) {
+AfterCommand runOnShard(Shard& shard, const std::vector<std::string_view>& argv,
+                        std::string& out, const LoopStats& stats) {
   // An empty inline line. Not a command, so nothing is answered.
   if (argv.empty()) return AfterCommand::kKeepOpen;
 
@@ -453,6 +468,335 @@ AfterCommand dispatch(Shard& shard, const std::vector<std::string_view>& argv,
     resp::encodeError(message, out);
   }
 
+  return AfterCommand::kKeepOpen;
+}
+
+// ------------------------------------------------------------- routing
+//
+// Everything above executes against one shard and knows nothing about threads.
+// Everything below decides which shard, and what to do when the answer is not
+// this one's to give.
+
+namespace {
+
+// Commands that operate on exactly one key, which is always argv[1], with the
+// argument counts each accepts.
+//
+// The counts are here, and not left to the owning shard to discover, because a
+// command that cannot be right must not travel: the design says validation
+// happens before any message is sent, and `GET k extra` routed to another loop
+// only to come back an error is a round trip spent on a question already
+// answerable.
+const std::map<std::string, std::vector<std::size_t>>& singleKeyArities() {
+  static const std::map<std::string, std::vector<std::size_t>> kArities = {
+      {"set", {3, 5}},   {"get", {2}},     {"getset", {3}},  {"append", {3}},
+      {"strlen", {2}},   {"incr", {2}},    {"decr", {2}},    {"incrby", {3}},
+      {"decrby", {3}},   {"type", {2}},    {"expire", {3}},  {"ttl", {2}},
+      {"persist", {2}},
+  };
+  return kArities;
+}
+
+bool isSingleKeyCommand(const std::string& name) {
+  return singleKeyArities().count(name) != 0;
+}
+
+// Whether this argument count is one the command accepts at all. A count that
+// is wrong is answered here; a count that is right is still checked again on
+// the shard, which owns the finer syntax (SET's EX keyword, for instance).
+bool singleKeyArityAccepted(const std::string& name, std::size_t argc) {
+  const auto it = singleKeyArities().find(name);
+  if (it == singleKeyArities().end()) return true;
+  for (const std::size_t accepted : it->second) {
+    if (argc == accepted) return true;
+  }
+  return false;
+}
+
+// Commands answered here, without touching any shard.
+bool isConnectivityCommand(const std::string& name) {
+  return name == "ping" || name == "echo" || name == "quit" || name == "command";
+}
+
+// Groups the keys of a multi-key command by the shard that owns them, keeping
+// each key's original position so the reply can be rebuilt in the order the
+// client wrote it.
+struct Group {
+  std::vector<std::string> argv;
+  std::vector<std::uint32_t> indices;
+};
+
+std::map<std::size_t, Group> groupByShard(const std::vector<std::string_view>& argv,
+                                          std::size_t first, std::size_t stride,
+                                          std::size_t shards) {
+  std::map<std::size_t, Group> groups;
+  std::uint32_t position = 0;
+  for (std::size_t i = first; i < argv.size(); i += stride, ++position) {
+    Group& group = groups[shardForKey(argv[i], shards)];
+    // Owned copies, always. The read buffer these views point into may be
+    // reused long before the reply comes back.
+    for (std::size_t j = 0; j < stride; ++j) {
+      group.argv.emplace_back(argv[i + j]);
+    }
+    group.indices.push_back(position);
+  }
+  return groups;
+}
+
+// Everything in the INFO body that does not depend on a loop.
+//
+// Which is very little, and that is the point. Every counter here used to be
+// taken from whichever loop happened to answer and printed under a fixed
+// "loop0_" label -- wrong twice over, in the value and in the name. They now
+// arrive with the fan-out, and only the version and the shard count, which no
+// loop owns, are written here.
+std::string infoHeader(std::size_t shards) {
+  std::string body;
+  body += "# Server\r\n";
+  body += "shardkv_version:0.2.0\r\n";
+  // From the router, which is the thing that actually decides how many shards
+  // there are. Taking it from LoopStats meant two sources for one fact, and two
+  // sources can disagree: a router over four shards with default stats reported
+  // one while faithfully fanning out over four.
+  body += "shards:" + formatDecimal(static_cast<std::int64_t>(shards)) + "\r\n";
+  return body;
+}
+
+// The numbers a loop knows about itself, gathered for the fan-out.
+LoopFacts factsFrom(const LoopStats& stats, std::size_t shards) {
+  LoopFacts facts;
+  facts.connections = stats.connections;
+  facts.loops = shards;
+  facts.short_writes = stats.short_writes;
+  facts.peer_gone_writes = stats.peer_gone_writes;
+  facts.cross_shard_requests = stats.cross_shard_requests;
+  facts.pinned = stats.pinned;
+  return facts;
+}
+
+// Delivers straight into a slot, for work whose keys turned out to be local.
+struct SlotDeliverer {
+  ReplySlots* slots;
+  std::uint32_t slot;
+
+  void whole(std::string resp) { slots->fill(slot, std::move(resp)); }
+  void part(std::uint32_t index, std::optional<std::string> value) {
+    slots->contribute(slot, index, std::move(value));
+  }
+  void count(std::int64_t n) { slots->contributeCount(slot, n); }
+  void status() { slots->contributeCount(slot, 0); }
+};
+
+}  // namespace
+
+void executeCrossShardRequest(Shard& shard, const CrossShardRequest& request,
+                              ReplySlots& slots, LoopFacts facts) {
+  SlotDeliverer deliverer{&slots, request.slot};
+  runCrossShardRequest(shard, request, facts, deliverer);
+}
+
+// Per-loop, not global: a message already carries the loop it came from, so
+// (loop, counter) is unique with no shared atomic. thread_local is exactly
+// per-loop, since a loop is a thread.
+std::uint64_t nextConnectionIdForTest() {
+  static thread_local std::uint64_t counter = 0;
+  return ++counter;
+}
+
+AfterCommand dispatch(ShardRouter& router, ReplySlots& slots, std::uint32_t slot,
+                      std::uint64_t conn_id, const std::vector<std::string_view>& argv,
+                      const LoopStats& stats) {
+  // An empty inline line. Not a command, and nothing is owed -- but the slot was
+  // reserved, so it has to be closed out or the connection stalls behind it.
+  if (argv.empty()) {
+    slots.fill(slot, "");
+    return AfterCommand::kKeepOpen;
+  }
+
+  const std::string name = lowered(argv[0]);
+  const std::size_t shards = router.shardCount();
+
+  // Answered here: no key, so no shard.
+  if (isConnectivityCommand(name)) {
+    std::string out;
+    const AfterCommand after = runOnShard(router.local(), argv, out, stats);
+    slots.fill(slot, std::move(out));
+    return after;
+  }
+
+  auto sendGroup = [&](std::size_t shard, Delivery delivery, std::vector<std::string> group_argv,
+                       std::vector<std::uint32_t> indices, std::uint32_t group_tag) {
+    CrossShardRequest request;
+    request.origin_loop = router.localShard();
+    request.conn_id = conn_id;
+    request.slot = slot;
+    request.group = group_tag;
+    request.delivery = delivery;
+    request.argv = std::move(group_argv);
+    request.indices = std::move(indices);
+    router.send(shard, std::move(request));
+  };
+
+  if (isSingleKeyCommand(name)) {
+    // A command that cannot be right does not travel. This covers both too few
+    // arguments to have a key at all and too many to be the command it claims
+    // to be.
+    if (!singleKeyArityAccepted(name, argv.size())) {
+      std::string out;
+      runOnShard(router.local(), argv, out, stats);
+      slots.fill(slot, std::move(out));
+      return AfterCommand::kKeepOpen;
+    }
+
+    const std::size_t owner = shardForKey(argv[1], shards);
+    if (owner == router.localShard()) {
+      std::string out;
+      runOnShard(router.local(), argv, out, stats);
+      slots.fill(slot, std::move(out));
+      return AfterCommand::kKeepOpen;
+    }
+
+    std::vector<std::string> owned;
+    owned.reserve(argv.size());
+    for (const auto& part : argv) owned.emplace_back(part);
+    sendGroup(owner, Delivery::kWhole, std::move(owned), {}, 0);
+    return AfterCommand::kKeepOpen;
+  }
+
+  // ---------------------------------------------------- multi-key commands
+  //
+  // Arity and syntax are checked here, before a single group is sent, so a
+  // rejected command reaches no shard at all.
+
+  const bool is_mget = name == "mget";
+  const bool is_mset = name == "mset";
+  const bool is_del = name == "del";
+  const bool is_exists = name == "exists";
+
+  if (is_mget || is_mset || is_del || is_exists) {
+    if (argv.size() < 2 || (is_mset && (argv.size() < 3 || (argv.size() - 1) % 2 != 0))) {
+      std::string out;
+      wrongArity(argv[0], out);
+      slots.fill(slot, std::move(out));
+      return AfterCommand::kKeepOpen;
+    }
+
+    const std::size_t stride = is_mset ? 2 : 1;
+    auto groups = groupByShard(argv, 1, stride, shards);
+
+    Aggregate aggregate;
+    aggregate.remaining = static_cast<std::uint32_t>(groups.size());
+    if (is_mget) {
+      aggregate.kind = AggregateKind::kArray;
+      aggregate.parts.resize(argv.size() - 1);
+      // Per KEY, not per group: an array aggregate completes when every element
+      // has arrived, and one group may carry several of them. Counting groups
+      // here finished the aggregate on a group's first element and truncated
+      // the rest -- which is what MGET spanning one shard did until a test
+      // caught it.
+      aggregate.remaining = static_cast<std::uint32_t>(argv.size() - 1);
+    } else if (is_mset) {
+      aggregate.kind = AggregateKind::kStatus;
+    } else {
+      aggregate.kind = AggregateKind::kCount;
+    }
+    slots.beginAggregate(slot, std::move(aggregate));
+
+    const Delivery delivery = is_mget   ? Delivery::kArrayParts
+                              : is_mset ? Delivery::kStatus
+                                        : Delivery::kCount;
+    const std::uint32_t tag = is_del ? kDeleteGroup : 0;
+
+    for (auto& [shard, group] : groups) {
+      if (shard == router.localShard()) {
+        CrossShardRequest local;
+        local.slot = slot;
+        local.group = tag;
+        local.delivery = delivery;
+        local.argv = std::move(group.argv);
+        local.indices = std::move(group.indices);
+        SlotDeliverer deliverer{&slots, slot};
+        runCrossShardRequest(router.local(), local, factsFrom(stats, shards),
+                             deliverer);
+      } else {
+        sendGroup(shard, delivery, std::move(group.argv), std::move(group.indices), tag);
+      }
+    }
+    return AfterCommand::kKeepOpen;
+  }
+
+  // ------------------------------------------------------ fan-out commands
+  //
+  // Every shard, every time. A DBSIZE that answered for the local shard alone
+  // would not be slow, it would be wrong.
+
+  if (name == "dbsize" || name == "flushdb" || name == "info") {
+    if (argv.size() != 1) {
+      std::string out;
+      wrongArity(argv[0], out);
+      slots.fill(slot, std::move(out));
+      return AfterCommand::kKeepOpen;
+    }
+
+    Aggregate aggregate;
+    aggregate.remaining = static_cast<std::uint32_t>(shards);
+    if (name == "dbsize") {
+      aggregate.kind = AggregateKind::kCount;
+    } else if (name == "flushdb") {
+      aggregate.kind = AggregateKind::kStatus;
+    } else {
+      aggregate.kind = AggregateKind::kInfo;
+      // Six numbers per loop, flat: field * loops + loop. One vector rather
+      // than six, because the slot machinery counts contributions and has no
+      // opinion about what they mean.
+      aggregate.parts.resize(shards * static_cast<std::size_t>(InfoField::kCount));
+      aggregate.header = infoHeader(shards);
+      aggregate.remaining =
+          static_cast<std::uint32_t>(shards * static_cast<std::size_t>(InfoField::kCount));
+    }
+    slots.beginAggregate(slot, std::move(aggregate));
+
+    const Delivery delivery = (name == "flushdb") ? Delivery::kStatus
+                              : (name == "info")  ? Delivery::kLoopInfo
+                                                  : Delivery::kCount;
+
+    // Remote first, local last, and the order matters for INFO.
+    //
+    // A loop's own cross_shard_requests is read when it contributes its part.
+    // Contributing in shard order meant reading the counter partway through
+    // issuing this very INFO's sends, so the number depended on where the
+    // client's loop sat in the ordering -- loop 0 reported none of them, loop 3
+    // reported three. Sending everything first makes the reading the same
+    // wherever the connection landed.
+    for (std::size_t shard = 0; shard < shards; ++shard) {
+      if (shard == router.localShard()) continue;
+      CrossShardRequest request;
+      request.origin_loop = router.localShard();
+      request.conn_id = conn_id;
+      request.slot = slot;
+      request.delivery = delivery;
+      if (name == "info") request.indices.push_back(static_cast<std::uint32_t>(shard));
+      router.send(shard, std::move(request));
+    }
+
+    {
+      CrossShardRequest local;
+      local.slot = slot;
+      local.delivery = delivery;
+      if (name == "info") {
+        local.indices.push_back(static_cast<std::uint32_t>(router.localShard()));
+      }
+      SlotDeliverer deliverer{&slots, slot};
+      runCrossShardRequest(router.local(), local, factsFrom(stats, shards),
+                           deliverer);
+    }
+    return AfterCommand::kKeepOpen;
+  }
+
+  // Everything else, HELLO included.
+  std::string out;
+  runOnShard(router.local(), argv, out, stats);
+  slots.fill(slot, std::move(out));
   return AfterCommand::kKeepOpen;
 }
 

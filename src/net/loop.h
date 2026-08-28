@@ -4,15 +4,38 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
+#include "base/mpsc_queue.h"
 #include "base/unique_fd.h"
 #include "commands/dispatch.h"
+#include "commands/router.h"
+#include "net/message.h"
+#include "base/buffer.h"
 #include "store/shard.h"
 
 namespace shardkv {
 
 class Connection;
 class Listener;
+class Loop;
+
+// A loop's two inboxes and the eventfd that wakes it. Held outside the Loop so
+// that every loop can reach every other's, without any loop reaching another's
+// shard, connections or slots.
+struct Inbox {
+  MpscQueue<CrossShardRequest> requests;
+  MpscQueue<CrossShardReply> replies;
+  int wake_fd = -1;
+};
+
+// Shared by construction and by nothing else: the queues are the only channel
+// between threads, and `stopping` is the flag that lets every producer stop
+// before any consumer is torn down.
+struct LoopTable {
+  std::vector<std::unique_ptr<Inbox>> inboxes;
+  std::atomic<bool> stopping{false};
+};
 
 // One epoll instance, one set of connections, one shard -- and, from the second
 // task onward, one thread and one core.
@@ -23,7 +46,11 @@ class Listener;
 // anywhere inside, now or later: a Loop is touched by its own thread only.
 class Loop {
  public:
-  Loop(std::uint16_t port, Shard& shard);
+  // `inboxes` is the table of every loop's queues, this one included, so a
+  // loop can deliver to any other. Nothing in it is written by more than one
+  // thread except through the queues themselves.
+  Loop(std::uint16_t port, Shard& shard, std::size_t index, LoopTable& table,
+       bool pin);
   ~Loop();
 
   Loop(const Loop&) = delete;
@@ -40,9 +67,15 @@ class Loop {
   // Safe to call from another thread; wakes the loop.
   void stop();
 
+
+
  private:
   void acceptReady();
   void closeConnection(int fd);
+
+  // Takes everything queued for this loop: requests from other loops to run
+  // against this shard, and replies to commands this loop sent out.
+  void drainInbox();
 
   // Adds or drops EPOLLOUT to match whether the connection has pending bytes.
   void updateInterest(Connection& connection);
@@ -60,11 +93,15 @@ class Loop {
   UniqueFd epoll_fd_;
   std::unique_ptr<Listener> listener_;
   Shard* shard_ = nullptr;
+  std::size_t index_ = 0;
+  bool pin_requested_ = false;
+  LoopTable* table_ = nullptr;
+  std::unique_ptr<ShardRouter> router_;
+  LoopStats stats_;
+  std::uint64_t next_conn_id_ = 0;
   UniqueFd wake_fd_;
   std::uint16_t port_ = 0;
 
-  // Kept in step with connections_ so INFO reports the live count.
-  LoopStats stats_;
 
   // Written by stop() from another thread, read by run().
   std::atomic<bool> stopping_{false};

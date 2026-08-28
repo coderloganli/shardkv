@@ -5,11 +5,12 @@ A concurrent in-memory key-value store in C++20, speaking the Redis wire protoco
 keyspace partitioned across those cores, and no global lock anywhere on the
 request path.
 
-> **Status: work in progress.** The single-threaded server is written and its
-> command set works against a real `redis-cli`. The part the project is actually
-> about -- one event loop per core, the keyspace sharded across them -- is not
-> built yet. There are no performance numbers here, and there will not be any
-> until they have been measured on a named machine with a reproducible script.
+> **Status: work in progress.** The server runs N event loops on N threads with
+> the keyspace partitioned across them, and answers the v1 command set correctly
+> at any shard count. What is left is the resource management -- buffer
+> compaction, backpressure, sampled expiry -- and then measurement. There are no
+> performance numbers here, and there will not be any until they have been
+> measured on a named machine with a reproducible script.
 
 ## The idea
 
@@ -20,8 +21,8 @@ request path.
                     +--------------------------------------+
                         |           |           |
                 +-------▼---+ +-----▼-----+ +---▼-------+
-                |  Loop 0   | |  Loop 1   | | Loop N-1  |  one thread per core,
-                |  epoll    | |  epoll    | |  epoll    |  pinned by CPU affinity
+                |  Loop 0   | |  Loop 1   | | Loop N-1  |  one thread per shard
+                |  epoll    | |  epoll    | |  epoll    |  (--pin adds affinity)
                 |  conns    | |  conns    | |  conns    |
                 |  Shard 0  | |  Shard 1  | | Shard N-1 |  1/N of the keyspace
                 +-----------+ +-----------+ +-----------+
@@ -32,8 +33,9 @@ request path.
 ```
 
 Each thread owns its epoll instance, its set of connections, and one hash table
-shard that no other thread may touch. Threads share no mutable state; the only
-channel between them is a message queue.
+shard that no other thread may touch. No data is shared between threads -- keys,
+values, connections and buffers each belong to one thread for their whole life --
+and the only channel between them is a message queue.
 
 A key that lands on the loop its connection belongs to is served without crossing
 a thread, taking a lock, or allocating. A key that does not is forwarded to the
@@ -99,6 +101,10 @@ docker build -t shardkv-dev .
 docker run --rm -v "$PWD":/src -w /src shardkv-dev   bash -c 'cmake -B build && cmake --build build && ctest --test-dir build'
 ```
 
+Run several loops with `--shards N` (the default is the core count) and add
+`--pin` for CPU affinity, which is off by default because it does more harm than
+good on a container or a shared machine.
+
 Sanitizer builds are selected with `-DSHARDKV_SANITIZER=address` or `=thread`.
 The thread build additionally needs `--security-opt seccomp=unconfined` under
 Docker; `docs/architecture.md` says why.
@@ -117,9 +123,13 @@ rather than of the design, and each closes in a later step:
   resource-management work.
 - **`CONFIG` is not implemented**, so `redis-benchmark` prints
   `WARNING: Could not fetch server CONFIG` before running normally.
-- **Only one shard.** `--shards` exists and accepts 1; any other value is
-  refused rather than silently ignored, because a benchmark labelled
-  `--shards 8` that quietly ran on one loop would be worse than an error.
+- **A cross-shard `MSET` is not atomic.** Redis applies one indivisibly. Here
+  the writes land on different threads at different moments, so a concurrent
+  reader can see part of an `MSET` and not the rest. Single-key commands are
+  unaffected.
+- **Cross-shard commands cost an extra hop.** `MGET`, `MSET` and multi-key `DEL`
+  are slower here than in single-threaded Redis when their keys span shards.
+  That is the trade the architecture makes, not a defect.
 
 ## Design notes
 
@@ -130,8 +140,10 @@ rather than of the design, and each closes in a later step:
   a byte count, or "need more data", or a protocol error. It never touches a
   socket or the event loop, so it can be unit-tested by feeding it byte
   sequences — including split packets, coalesced packets, and malicious input.
-- **`COMMAND` must be implemented**, even if it only returns an empty array.
-  Recent `redis-cli` sends `COMMAND DOCS` on connect and hangs without a reply.
+- **`COMMAND` is implemented**, returning an empty array, because it costs
+  nothing and clients may reasonably ask. It is often said that a recent
+  `redis-cli` hangs without it; testing here did not reproduce that, and
+  `docs/product.md` records what was actually observed.
 
 ## Licence
 

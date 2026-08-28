@@ -8,10 +8,12 @@ namespace shardkv {
 
 // A listening socket with SO_REUSEPORT set.
 //
-// With one loop the option changes nothing observable. It is set now anyway,
-// because the next task gives every loop its own listener on the same port and
-// lets the kernel hash incoming connections across them -- and this file should
-// not have to change for that.
+// Every loop has one of these on the same port, and the kernel hands each
+// incoming connection to exactly one of them. How it chooses is not documented:
+// socket(7) promises improved accept distribution, not an algorithm, and the
+// assignment can be redefined outright with a BPF program. So nothing here
+// depends on the spread being even. What is relied on is only that a connection
+// arrives at one loop and stays there.
 class Listener {
  public:
   // port 0 asks the kernel to choose; read it back with port().
