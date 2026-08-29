@@ -42,11 +42,27 @@ class Connection {
   // be registered.
   bool wantsWrite() const;
 
-  // Whether this connection still has anything to read. False once a terminal
-  // slot exists: not reading is not enough on its own, because under
-  // level-triggered epoll an unread readable socket reports itself ready every
-  // time round and the loop spins.
-  bool wantsRead() const { return !stop_reading_; }
+  // How much the client has not taken yet. This is what the backpressure
+  // watermarks are measured against, and it is exposed because a test driving a
+  // real socket cannot arrange for an exact residual -- how much send() accepts
+  // is the kernel's business -- but it can observe one.
+  std::size_t pendingWriteBytes() const;
+
+  // Whether this connection has been stopped for backpressure, as opposed to
+  // stopped for good by QUIT or a protocol error.
+  bool readPaused() const { return read_paused_; }
+
+  // Whether this connection still has anything to read. False for two separate
+  // reasons, and they are not the same kind of thing.
+  //
+  // A terminal slot ends reading for good: not replying is not enough on its
+  // own, because under level-triggered epoll an unread readable socket reports
+  // itself ready every time round and the loop spins.
+  //
+  // Backpressure ends it temporarily: above the high watermark the socket stops
+  // being read from, so the kernel receive buffer fills and TCP flow control
+  // pushes back on the sender, until the write buffer drains to the low one.
+  bool wantsRead() const { return !stop_reading_ && !read_paused_; }
 
   // What the loop last told epoll about this connection, so that it only issues
   // EPOLL_CTL_MOD when the answer actually changed.
@@ -64,6 +80,12 @@ class Connection {
   // EAGAIN is treated as a short write, EPIPE and ECONNRESET close quietly.
   bool flush();
 
+  // Decides whether this connection should be read from, from what the client
+  // has not taken yet. Called from flush() and nowhere else: flush() is not the
+  // only thing that changes the write buffer -- takeReadyPrefix() appends to it
+  // first -- but it is where every path that changes it comes to rest.
+  void updateBackpressure();
+
   UniqueFd fd_;
   ShardRouter* router_ = nullptr;
   LoopStats* stats_ = nullptr;
@@ -79,6 +101,11 @@ class Connection {
   // Once a terminal slot exists, no further command is parsed from this
   // connection: whatever follows QUIT or a broken frame is not ours to answer.
   bool stop_reading_ = false;
+  // Backpressure: set when the write buffer reaches the high watermark, cleared
+  // when it falls to the low one. Owned by this connection and touched only by
+  // its own loop's thread -- it must not become the first piece of mutable
+  // state two threads can reach.
+  bool read_paused_ = false;
   std::uint32_t registered_events_ = 0;
 };
 

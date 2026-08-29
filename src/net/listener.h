@@ -24,7 +24,14 @@ class Listener {
 
   // Accepts one pending connection, already set non-blocking. Returns an empty
   // UniqueFd when there is nothing to accept.
-  UniqueFd accept();
+  // Takes one pending connection, or returns an empty descriptor.
+  //
+  // `out_of_descriptors`, when given, distinguishes the two ways that can
+  // happen: an empty backlog leaves it false, while EMFILE or ENFILE -- a
+  // connection waiting that could not be given a descriptor -- sets it. The
+  // caller must tell them apart, because under level-triggered epoll retrying
+  // the second is a spin that never ends.
+  UniqueFd accept(bool* out_of_descriptors = nullptr);
 
  private:
   UniqueFd fd_;

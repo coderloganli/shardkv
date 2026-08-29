@@ -16,6 +16,8 @@ enum class InfoField : std::uint32_t {
   kShortWrites,
   kPeerGoneWrites,
   kCrossShardRequests,
+  kReadPauses,
+  kAcceptFailures,
   kPinned,
   kCount,
 };

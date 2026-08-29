@@ -6,11 +6,12 @@ keyspace partitioned across those cores, and no global lock anywhere on the
 request path.
 
 > **Status: work in progress.** The server runs N event loops on N threads with
-> the keyspace partitioned across them, and answers the v1 command set correctly
-> at any shard count. What is left is the resource management -- buffer
-> compaction, backpressure, sampled expiry -- and then measurement. There are no
-> performance numbers here, and there will not be any until they have been
-> measured on a named machine with a reproducible script.
+> the keyspace partitioned across them, answers the v1 command set correctly at
+> any shard count, and holds its resources: buffers compact, a client that will
+> not read its replies is stopped being read from, and expired keys nobody
+> touches again are reaped in the background. What is left is measurement. There
+> are no performance numbers here, and there will not be any until they have
+> been measured on a named machine with a reproducible script.
 
 ## The idea
 
@@ -109,18 +110,39 @@ Sanitizer builds are selected with `-DSHARDKV_SANITIZER=address` or `=thread`.
 The thread build additionally needs `--security-opt seccomp=unconfined` under
 Docker; `docs/architecture.md` says why.
 
+## Watching it under load
+
+`scripts/soak.sh` keeps load on the server and samples RSS, the open descriptor
+count and the `INFO` counters into a CSV. It is looking for a slope rather than
+a number: flat curves say the buffers, the connections and the expiry sampler
+all give back what they take. It prints no throughput figure, because a number
+taken under an arbitrary background load is not a number.
+
+```
+docker run --rm -v "$PWD":/src -w /src shardkv-dev scripts/soak.sh
+```
+
+The default run is short so the script itself is exercisable; `SOAK_SECONDS=3600`
+is the full hour.
+
 ## Known limitations
 
 Beyond the deliberate omissions above, these are gaps of the current state
 rather than of the design, and each closes in a later step:
 
-- **An expired key that is never accessed again is never freed.** Expiry is
-  lazy; the background sampling that would reap untouched keys is not written
-  yet, and `DBSIZE` counts such keys.
-- **Buffers only grow.** A connection holds a read buffer as large as its
-  largest burst, and a client that never reads its replies grows the write
-  buffer without bound. Compaction and backpressure watermarks come with the
-  resource-management work.
+- **A connection keeps a buffer as large as its largest burst.** The consumed
+  prefix is compacted away, so a buffer no longer grows with the number of
+  requests a connection has served -- but the allocation itself is kept and
+  reused rather than returned. That is a choice, not an omission; the reasoning
+  is in `docs/adr/`.
+- **A slow client stalls, and is never disconnected.** Above a high watermark of
+  pending output the connection stops being read from and TCP flow control
+  pushes back on the sender; there is no output-buffer limit at which a client
+  is closed. A client on a bad link waits rather than losing its replies.
+- **Expired keys are freed on a sweep, not the instant they expire.** A key past
+  its deadline is never *observable* -- every lookup enforces it -- but the
+  memory comes back when the per-loop sampler next reaches it, so `DBSIZE` can
+  briefly count keys that are already dead.
 - **`CONFIG` is not implemented**, so `redis-benchmark` prints
   `WARNING: Could not fetch server CONFIG` before running normally.
 - **A cross-shard `MSET` is not atomic.** Redis applies one indivisibly. Here

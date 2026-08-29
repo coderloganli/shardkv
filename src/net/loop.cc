@@ -5,6 +5,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/sysinfo.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -26,6 +27,17 @@ namespace shardkv {
 namespace {
 
 constexpr int kMaxEvents = 64;
+
+// The loop's tick. 100 ms rather than something smaller because an otherwise
+// idle server should not wake ten times more often than it needs to; an idle
+// tick is one read() and one walk of the table that finds nothing.
+constexpr long kTickNanoseconds = 100L * 1000 * 1000;
+
+// Sampled expiry, per tick: keys per pass, and how many passes. The product
+// bounds the work a tick does, and the bound does not depend on how large the
+// shard is.
+constexpr std::size_t kExpirySampleKeys = 20;
+constexpr int kExpirySampleMaxPasses = 8;
 
 // Packs the answer to a cross-shard request into a reply message and posts it
 // to the loop that asked. The counterpart of SlotDeliverer, which is what a
@@ -104,6 +116,27 @@ Loop::Loop(std::uint16_t port, Shard& shard, std::size_t index, LoopTable& table
   if (::epoll_ctl(epoll_fd_.get(), EPOLL_CTL_ADD, wake_fd_.get(), &ev) < 0) {
     fail("epoll_ctl(eventfd)");
   }
+
+  // A timerfd rather than a timeout on epoll_wait. A timeout has to be
+  // recomputed from the time actually elapsed on every turn, and a loop woken
+  // often by traffic would keep restarting its own deadline and never sample --
+  // which is the case where sampling matters most. A descriptor is something
+  // this loop already knows what to do with, and epoll_wait keeps its infinite
+  // timeout.
+  timer_fd_ = UniqueFd(::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
+  if (!timer_fd_) fail("timerfd_create");
+
+  itimerspec period{};
+  period.it_interval.tv_nsec = kTickNanoseconds;
+  period.it_value.tv_nsec = kTickNanoseconds;
+  if (::timerfd_settime(timer_fd_.get(), 0, &period, nullptr) < 0) {
+    fail("timerfd_settime");
+  }
+
+  ev.data.fd = timer_fd_.get();
+  if (::epoll_ctl(epoll_fd_.get(), EPOLL_CTL_ADD, timer_fd_.get(), &ev) < 0) {
+    fail("epoll_ctl(timerfd)");
+  }
 }
 
 Loop::~Loop() = default;
@@ -175,6 +208,17 @@ void Loop::run() {
         continue;
       }
 
+      if (fd == timer_fd_.get()) {
+        // One read takes the whole expiry count, however many ticks were
+        // missed. What matters is that the work happens, not how many ticks it
+        // stands for.
+        std::uint64_t ticks = 0;
+        while (::read(timer_fd_.get(), &ticks, sizeof(ticks)) > 0) {
+        }
+        onTick();
+        continue;
+      }
+
       if (fd == listener_->fd()) {
         acceptReady();
         continue;
@@ -209,8 +253,15 @@ void Loop::acceptReady() {
   // pending connection now costs one extra accept() and saves a wakeup per
   // connection under a burst.
   for (;;) {
-    UniqueFd client = listener_->accept();
-    if (!client) return;
+    bool out_of_descriptors = false;
+    UniqueFd client = listener_->accept(&out_of_descriptors);
+    if (!client) {
+      if (out_of_descriptors) {
+        ++stats_.accept_failures;
+        throttleListener();
+      }
+      return;
+    }
 
     const int fd = client.get();
     auto connection =
@@ -251,6 +302,67 @@ void Loop::updateInterest(Connection& connection) {
   }
 }
 
+// The loop's tick, which does two unrelated jobs because neither justifies a
+// timer of its own.
+void Loop::onTick() {
+  // Sampled expiry, against this loop's own shard, on this loop's own thread --
+  // so the background reaper adds no cross-thread reachability at all. A
+  // "background cleaner" usually arrives as a separate thread with a lock, and
+  // here it must not.
+  //
+  // Bounded work, that accelerates while it keeps finding something: stop as
+  // soon as a pass reclaims a quarter or less of what it looked at. A shard
+  // that has just had a million keys expire reclaims them quickly; one with
+  // nothing to find stops after one pass.
+  for (int pass = 0; pass < kExpirySampleMaxPasses; ++pass) {
+    const SampleResult sampled = shard_->sampleExpired(kExpirySampleKeys);
+    if (sampled.visited == 0) break;
+    if (sampled.erased * 4 <= sampled.visited) break;
+  }
+
+  if (listener_throttled_) armListener();
+}
+
+// Registering no events at all, rather than EPOLL_CTL_DEL: the descriptor stays
+// in the set, so re-arming is one MOD and cannot race with a lookup that finds
+// nothing.
+//
+// Both of these set the flag only when the call succeeded, and neither reports
+// a failure, because in both directions the state machine already retries and
+// the retry is the honest response:
+//
+//   throttle fails  -> the flag stays false, so the next refused accept() tries
+//                      again. Until one succeeds the loop is spinning, which is
+//                      the behaviour that existed before this change.
+//   re-arm fails    -> the flag stays true, so the next tick tries again. The
+//                      listener is registered for nothing in the meantime,
+//                      which costs latency on a waiting connection and nothing
+//                      else.
+//
+// Neither is reachable in practice -- EPOLL_CTL_MOD on a descriptor this loop
+// registered itself and still owns has no failure mode short of a corrupted
+// epoll set -- which is why there is no test for it and why failing loudly
+// would be the wrong trade. Loop::updateInterest() takes the same line for the
+// same reason.
+void Loop::throttleListener() {
+  if (listener_throttled_) return;
+  epoll_event ev{};
+  ev.events = 0;
+  ev.data.fd = listener_->fd();
+  if (::epoll_ctl(epoll_fd_.get(), EPOLL_CTL_MOD, listener_->fd(), &ev) == 0) {
+    listener_throttled_ = true;
+  }
+}
+
+void Loop::armListener() {
+  epoll_event ev{};
+  ev.events = EPOLLIN;
+  ev.data.fd = listener_->fd();
+  if (::epoll_ctl(epoll_fd_.get(), EPOLL_CTL_MOD, listener_->fd(), &ev) == 0) {
+    listener_throttled_ = false;
+  }
+}
+
 // Everything queued for this loop: work other loops want run against this
 // shard, and answers to work this loop sent out.
 void Loop::drainInbox() {
@@ -285,6 +397,8 @@ void Loop::drainInbox() {
     facts.short_writes = stats_.short_writes;
     facts.peer_gone_writes = stats_.peer_gone_writes;
     facts.cross_shard_requests = stats_.cross_shard_requests;
+    facts.read_pauses = stats_.read_pauses;
+    facts.accept_failures = stats_.accept_failures;
     facts.pinned = stats_.pinned;
     runCrossShardRequest(*shard_, request, facts, deliverer);
   }

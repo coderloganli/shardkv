@@ -69,7 +69,8 @@ int Listener::fd() const { return fd_.get(); }
 
 std::uint16_t Listener::port() const { return port_; }
 
-UniqueFd Listener::accept() {
+UniqueFd Listener::accept(bool* out_of_descriptors) {
+  if (out_of_descriptors != nullptr) *out_of_descriptors = false;
   const int fd = ::accept(fd_.get(), nullptr, nullptr);
   if (fd < 0) {
     // Nothing pending, or the connection died between the event and the
@@ -78,9 +79,16 @@ UniqueFd Listener::accept() {
         errno == EINTR) {
       return UniqueFd();
     }
-    // EMFILE and ENFILE land here: the process is out of descriptors. The
-    // caller drops the event and carries on rather than dying, so that a
-    // descriptor limit degrades service instead of ending it.
+    // EMFILE and ENFILE: the process is out of descriptors, and there IS a
+    // connection waiting -- that is what makes it different from EAGAIN.
+    //
+    // The caller has to be told, because under level-triggered epoll it cannot
+    // simply drop the event: the connection stays in the backlog, the listener
+    // stays readable, and retrying burns a core. See
+    // docs/adr/0013-a-listener-out-of-descriptors-is-throttled-not-retried.md
+    if (errno == EMFILE || errno == ENFILE) {
+      if (out_of_descriptors != nullptr) *out_of_descriptors = true;
+    }
     return UniqueFd();
   }
   setNonBlocking(fd);

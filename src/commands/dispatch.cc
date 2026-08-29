@@ -259,6 +259,10 @@ void infoCommand(Shard& shard, const LoopStats& stats, std::string& out) {
           formatDecimal(static_cast<std::int64_t>(stats.short_writes)) + "\r\n";
   body += "loop0_peer_gone_writes:" +
           formatDecimal(static_cast<std::int64_t>(stats.peer_gone_writes)) + "\r\n";
+  body += "loop0_read_pauses:" +
+          formatDecimal(static_cast<std::int64_t>(stats.read_pauses)) + "\r\n";
+  body += "loop0_accept_failures:" +
+          formatDecimal(static_cast<std::int64_t>(stats.accept_failures)) + "\r\n";
   resp::encodeBulkString(body, out);
 }
 
@@ -570,6 +574,8 @@ LoopFacts factsFrom(const LoopStats& stats, std::size_t shards) {
   facts.short_writes = stats.short_writes;
   facts.peer_gone_writes = stats.peer_gone_writes;
   facts.cross_shard_requests = stats.cross_shard_requests;
+  facts.read_pauses = stats.read_pauses;
+  facts.accept_failures = stats.accept_failures;
   facts.pinned = stats.pinned;
   return facts;
 }
