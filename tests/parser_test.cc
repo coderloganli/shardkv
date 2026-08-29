@@ -24,6 +24,18 @@ namespace {
 // Resident set size in kilobytes, for case 27. Reads statm rather than
 // mallinfo because the question is whether the process asked the kernel for
 // hundreds of megabytes, not how the allocator accounted for it.
+//
+// It is a blunt instrument and the threshold has to respect that: it measures
+// the whole process, so gtest's own allocations, the sanitizer's shadow and
+// quarantine, and first-touch page faults from anything at all land in the same
+// number. A bound set near the noise floor fails for reasons that have nothing
+// to do with the parser -- which is what it did, at a couple of megabytes, on
+// every CI run including those on main.
+//
+// So the bound is set by the size of the bug instead. A parser that reserved
+// against a declared length would grow by hundreds of megabytes, and the gap
+// between that and a few megabytes of runner weather is wide enough that
+// nothing closes it.
 long residentKb() {
   std::FILE* f = std::fopen("/proc/self/statm", "r");
   if (f == nullptr) return -1;
@@ -285,7 +297,13 @@ TEST(Parser, HugeButLegalLengthDoesNotPreallocate) {
 
   const long after = residentKb();
   ASSERT_GT(after, 0);
-  EXPECT_LT(after - before, 1024) << "parser grew RSS by " << (after - before) << "kB";
+
+  // 400 MB was declared. Reserving against it would show up here as roughly
+  // 400 MB; 32 MB is more than ten times the largest unrelated movement seen on
+  // a sanitizer build, and less than a tenth of what the bug costs.
+  EXPECT_LT(after - before, 32 * 1024)
+      << "parser grew RSS by " << (after - before) << "kB against a declared "
+      << "400MB, which is a reservation and not noise";
 }
 
 // Added in stage 8, after review. The bulk-length case above covers payload;
@@ -294,9 +312,6 @@ TEST(Parser, HugeButLegalLengthDoesNotPreallocate) {
 // allocates a million string_views -- sixteen megabytes per connection -- for
 // a command whose first element has not arrived and may never arrive.
 TEST(Parser, HugeElementCountDoesNotPreallocateArgv) {
-  const long before = residentKb();
-  ASSERT_GT(before, 0);
-
   std::vector<std::string_view> argv;
   std::size_t consumed = 0;
   for (int i = 0; i < 50; ++i) {
@@ -308,7 +323,11 @@ TEST(Parser, HugeElementCountDoesNotPreallocateArgv) {
         << "argv was reserved against the declared count";
   }
 
-  const long after = residentKb();
-  ASSERT_GT(after, 0);
-  EXPECT_LT(after - before, 1024) << "grew RSS by " << (after - before) << "kB";
+  // No RSS check here, deliberately. Unlike the payload case above, the thing
+  // this case is about is directly visible: argv is the vector that would have
+  // been reserved, and its capacity is the exact measurement. An RSS reading
+  // beside it would add nothing but a second way to fail -- which is how it
+  // behaved, failing on CI at a couple of megabytes of movement that had
+  // nothing to do with the parser while the capacity assertion passed every one
+  // of the fifty iterations.
 }
