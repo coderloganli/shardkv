@@ -509,3 +509,122 @@ TEST(Sharding, SingleShardTakesNoCrossShardPath) {
   EXPECT_EQ(fieldOf(infoOf(c), "cross_shard_requests"), 0)
       << "one shard means nothing is ever sent anywhere";
 }
+
+// 33, the several-shards half. The parts of an INFO aggregate are laid out flat
+// as field * loops + loop, and the width of that comes from InfoField::kCount --
+// so a field added in one place and not another does not fail to compile, it
+// silently reports one loop's number under another loop's name. With four
+// loops, every per-loop field must be present and readable for every loop.
+TEST(Sharding, InfoCarriesTheNewCountersForEveryLoop) {
+  const std::size_t shards = 4;
+  Running server(shards);
+  Client client(server.port());
+  const std::string info = infoOf(client);
+
+  for (std::size_t i = 0; i < shards; ++i) {
+    const std::string n = std::to_string(i);
+    EXPECT_GE(fieldOf(info, "loop" + n + "_read_pauses"), 0)
+        << "loop" << n << "_read_pauses is missing:\n"
+        << info;
+    EXPECT_GE(fieldOf(info, "loop" + n + "_accept_failures"), 0)
+        << "loop" << n << "_accept_failures is missing:\n"
+        << info;
+
+    // The fields that were already there must still read correctly beside the
+    // new ones, which is what catches a misaligned aggregate rather than an
+    // absent field.
+    EXPECT_GE(fieldOf(info, "loop" + n + "_connections"), 0);
+    EXPECT_GE(fieldOf(info, "loop" + n + "_short_writes"), 0);
+    EXPECT_GE(fieldOf(info, "loop" + n + "_peer_gone_writes"), 0);
+    EXPECT_GE(fieldOf(info, "loop" + n + "_cross_shard_requests"), 0);
+    EXPECT_GE(fieldOf(info, "shard" + n + "_keys"), 0);
+  }
+
+  // Exactly one connection exists, so exactly one loop may claim it. A
+  // misaligned parts vector shows up here as two loops claiming one connection,
+  // or none claiming it.
+  int claiming = 0;
+  for (std::size_t i = 0; i < shards; ++i) {
+    if (fieldOf(info, "loop" + std::to_string(i) + "_connections") >= 1) ++claiming;
+  }
+  EXPECT_EQ(claiming, 1) << "the per-loop fields are misaligned:\n" << info;
+}
+
+// Backpressure on the cross-shard reply path.
+//
+// Added at stage 8, after review: cases 7-15 drive backpressure through a
+// Connection directly and through a one-loop server, so both reach flush() from
+// onReadable(). A reply that came back from another loop reaches it by a third
+// route -- Loop::drainInbox() -> onSlotsChanged() -> flush() -> updateInterest()
+// -- and nothing covered that. It is the route where the connection's loop is
+// woken by an eventfd rather than by the socket, which is exactly where a
+// missing updateInterest() would leave a paused connection registered for the
+// wrong events.
+//
+// So: every key this client asks for belongs to a shard that is not its own
+// loop's, and it never reads the answers.
+TEST(Sharding, BackpressureEngagesOnRepliesThatCameFromAnotherLoop) {
+  const std::size_t shards = 4;
+  Running server(shards);
+
+  Client slow(server.port());
+  const std::size_t own_loop = loopOf(slow, shards);
+
+  // A megabyte under one key per remote shard.
+  const std::string big(1024 * 1024, 'x');
+  std::vector<std::string> remote_keys;
+  for (std::size_t shard = 0; shard < shards; ++shard) {
+    if (shard == own_loop) continue;
+    const std::string key = keyForShard(shard, shards, "big");
+    remote_keys.push_back(key);
+    Client setup(server.port());
+    setup.send(resp({"SET", key, big}));
+    EXPECT_EQ(readReply(setup), "+OK\r\n");
+  }
+  ASSERT_FALSE(remote_keys.empty());
+
+  // Eight megabytes of replies, every one of them fetched from a loop that is
+  // not this connection's, and not a byte of it read.
+  std::string pipeline;
+  for (int i = 0; i < 8; ++i) {
+    pipeline += resp({"GET", remote_keys[i % remote_keys.size()]});
+  }
+  slow.send(pipeline);
+  std::this_thread::sleep_for(300ms);
+
+  Client probe(server.port());
+  const std::string info = infoOf(probe);
+
+  long long pauses = 0;
+  for (std::size_t i = 0; i < shards; ++i) {
+    const long long n = fieldOf(info, "loop" + std::to_string(i) + "_read_pauses");
+    ASSERT_GE(n, 0) << "loop" << i << "_read_pauses is missing:\n" << info;
+    pauses += n;
+  }
+  EXPECT_GT(pauses, 0)
+      << "eight megabytes of cross-shard replies to a client that never reads "
+         "did not engage backpressure:\n"
+      << info;
+
+  // The loop stalled on the slow client is still serving everyone else, which is
+  // the point of stalling one connection rather than the loop.
+  Client other(server.port());
+  other.send("PING\r\n");
+  EXPECT_EQ(readReply(other), "+PONG\r\n");
+
+  // And the paused connection is not wedged. This is the half that covers
+  // updateInterest() on the cross-shard route specifically: these replies were
+  // filled by a loop woken through its eventfd rather than through this socket,
+  // so if that path did not go on to fix the connection's epoll interest, the
+  // eight megabytes would never finish going out and this read would block
+  // rather than complete.
+  const std::size_t one_reply =
+      std::string("$1048576\r\n").size() + big.size() + 2;
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_EQ(readReply(slow).size(), one_reply)
+        << "reply " << i << " came back the wrong length";
+  }
+  slow.send("PING\r\n");
+  EXPECT_EQ(readReply(slow), "+PONG\r\n")
+      << "the connection never resumed being read from";
+}

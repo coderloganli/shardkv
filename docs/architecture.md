@@ -221,29 +221,44 @@ requests rather than reallocated per request. On the common path -- a single-key
 command that lands on the local shard -- a steady-state request causes no heap
 allocation at all.
 
-**Today they only ever grow.** Compacting a large consumed prefix is designed
-and not built; the buffer is cleared when it drains completely and not
-otherwise. As with expiry, this lands in two parts. The buffers are reused from
-the start;
-**compaction of the consumed prefix, and the backpressure watermarks below,
-arrive later with the rest of the resource management.** Until then a buffer only
-ever grows, so a long-lived connection issuing many commands holds a read buffer
-as large as its largest burst, and a client that never reads its replies grows
-the write buffer without bound. Both are known gaps of that interval, not
-oversights.
+**The consumed prefix is reclaimed; the capacity is not.** A buffer resets when
+it drains completely, and otherwise compacts -- moving the unread tail to the
+front -- once the consumed prefix is both at least 8 KiB and at least half the
+buffer. The byte floor keeps the request-at-a-time path free of `memmove`; the
+half condition bounds the cost, since a compaction moves no more bytes than it
+discards.
+
+What it does **not** do is hand the allocation back: a connection keeps a buffer
+as large as the largest burst it has served, and reuses it. That distinction is
+the one to have in mind when reading an RSS graph -- a buffer no longer grows
+with the *number* of requests served, which had no bound, but does sit at the
+size of the *biggest*, which does. Compaction moves bytes, so it invalidates
+`readable()`, which was always the contract. See
+`docs/adr/0011-buffers-compact-their-consumed-prefix-but-keep-their-capacity.md`.
 
 ### Backpressure
 
-A client that pipelines heavily and never reads its responses will grow the
-write buffer without bound if nothing stops it. **Nothing does, yet.** The plan
-is two watermarks: above the high one the connection stops being read from, so
-the kernel's receive buffer fills and TCP flow control pushes back on the
-sender; once the write buffer drains below the low one, reading resumes. Two
-rather than one, because a single threshold oscillates.
+A client that pipelines heavily and never reads its responses would grow the
+write buffer without bound if nothing stopped it. Two watermarks stop it. At or
+above 1 MiB of pending output the connection stops being read from -- `EPOLLIN`
+is dropped, the kernel's receive buffer fills, and TCP flow control pushes back
+on the sender. At or below 256 KiB, reading resumes. Two rather than one, because
+a single threshold oscillates at the boundary.
 
-That arrives with the rest of the resource management. Until it does, a
-non-reading client is an unbounded write buffer -- listed in the README among
-the known gaps, and visible in `INFO` as a loop's `short_writes` climbing.
+**No client is ever closed for being slow, and there is no output-buffer kill
+limit.** Once reading stops, no further command is parsed, so the buffer cannot
+grow past the replies to what was already read: the growth was unbounded because
+the parse was, and bounding one bounds the other. See
+`docs/adr/0010-backpressure-is-two-watermarks-and-never-a-disconnect.md`.
+
+**A paused connection always still wants to write** -- the invariant that keeps
+backpressure from wedging a client. Interest is computed from `wantsRead()` and
+`wantsWrite()`, so were both false the connection would be registered for no
+events and never woken again. Pausing needs 1 MiB pending and resuming happens at
+256 KiB, so while paused `EPOLLOUT` is always registered. A test pins it.
+
+In `INFO`, a loop's `short_writes` climbing says a client is not keeping up, and
+`read_pauses` says backpressure actually engaged.
 
 ### A cross-shard MSET is not atomic
 
@@ -276,16 +291,15 @@ decision record, which is the same argument as for the hash table: the
 optimisation is cheap to add once a profile asks for it, and the correctness
 traps it introduces (`SET k 001` must still `GET` as `001`) are expensive to find.
 
-**Expiry.** Lazy today, lazy plus sampled when it is finished. An expired key
-is dropped when it is next accessed; the background sample per loop that would
-clear keys nobody touches again is designed and not built. Lazy alone leaks
-memory for keys nobody reads, which is why the second half is not optional.
-
-The two halves land separately. The lazy half ships with the expiry commands;
-the sampling half comes later, with the rest of the resource management. Until
-it does, **an expired key that is never accessed again is never freed** — a known
-and accepted gap, not an oversight. `Value` carries its expiry deadline from the
-start so that closing the gap does not change the data structure.
+**Expiry.** Lazy plus sampled. An expired key is dropped when it is next
+accessed, in `Shard::lookup`, which is why no command can observe one. Lazy alone
+would leak the keys nobody reads again, so each loop's timer also runs bounded
+sampling passes over its own shard, sweeping the table on a cursor so that a lap
+without an intervening rehash reaches every key. `DBSIZE` still does not sweep -- it reports
+the table as it stands; what changed is that the table converges. The pass lives
+on `Shard` and takes its time from the shard's `Clock`, so tests drive the whole
+of it by hand rather than by sleeping. See
+`docs/adr/0012-a-timerfd-per-loop-drives-sampled-expiry.md`.
 
 **Eviction.** LRU is roadmap, not v1.
 
@@ -303,6 +317,22 @@ reconsidered, are in `docs/adr/0009-level-triggered-epoll-not-edge-triggered.md`
 permanently-registered writable socket spins the event loop. It is registered
 only when a `write()` comes up short and deregistered as soon as the buffer
 drains.
+
+**Each loop owns a timerfd with two duties.** It ticks every 100 ms in the
+loop's own epoll set -- so `epoll_wait` keeps its infinite timeout and the tick is
+just another descriptor to dispatch on -- and it both runs the expiry sampling
+pass and re-arms a throttled listener.
+
+**A listener out of descriptors is throttled, not retried.** `EAGAIN` from
+`accept()` means the backlog is empty and the loop can sleep; `EMFILE` means it is
+*not* empty and there was no descriptor to accept into, so retrying under
+level-triggered epoll is an unbreakable spin. The loop drops `EPOLLIN` from the
+listener and the next tick puts it back, so the waiting client sits in the
+backlog until this loop has a descriptor again rather than being refused -- at
+least a tick, and possibly longer, because dropping the interest does not take
+the listener out of its `SO_REUSEPORT` group and the kernel goes on assigning to
+it. `loopN_accept_failures` says it happened. See
+`docs/adr/0013-a-listener-out-of-descriptors-is-throttled-not-retried.md`.
 
 **The build environment is the container, not the developer's machine.** The
 repository carries a `Dockerfile` with the toolchain, CMake and `redis-tools`;

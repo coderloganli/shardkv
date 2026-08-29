@@ -41,6 +41,18 @@ struct LoopStats {
   // stores and reads back a "remote" key proves nothing about the path it took.
   std::size_t cross_shard_requests = 0;
 
+  // Times a connection on this loop crossed the high watermark and stopped
+  // being read from. Without it a test can show the server survived a slow
+  // client without showing that backpressure was ever engaged, which proves
+  // nothing.
+  std::size_t read_pauses = 0;
+
+  // Times accept() was refused a descriptor. Worth counting on its own terms,
+  // and it is what makes "the listener is not being retried on every turn of
+  // the loop" testable: the spin drives this up by millions in a fraction of a
+  // second, the throttle by one a tick.
+  std::size_t accept_failures = 0;
+
   // Reported by INFO so the pinning default is observable rather than assumed.
   bool pinned = false;
   std::size_t shard_count = 1;
@@ -98,6 +110,8 @@ struct LoopFacts {
   std::size_t short_writes = 0;
   std::size_t peer_gone_writes = 0;
   std::size_t cross_shard_requests = 0;
+  std::size_t read_pauses = 0;
+  std::size_t accept_failures = 0;
   bool pinned = false;
 };
 
@@ -181,6 +195,10 @@ void runCrossShardRequest(Shard& shard, const CrossShardRequest& request,
                    formatDecimal(static_cast<std::int64_t>(facts.short_writes)));
       deliver.part(at(InfoField::kPeerGoneWrites),
                    formatDecimal(static_cast<std::int64_t>(facts.peer_gone_writes)));
+      deliver.part(at(InfoField::kReadPauses),
+                   formatDecimal(static_cast<std::int64_t>(facts.read_pauses)));
+      deliver.part(at(InfoField::kAcceptFailures),
+                   formatDecimal(static_cast<std::int64_t>(facts.accept_failures)));
       deliver.part(at(InfoField::kCrossShardRequests),
                    formatDecimal(static_cast<std::int64_t>(facts.cross_shard_requests)));
       deliver.part(at(InfoField::kPinned), facts.pinned ? "1" : "0");

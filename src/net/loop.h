@@ -80,6 +80,20 @@ class Loop {
   // Adds or drops EPOLLOUT to match whether the connection has pending bytes.
   void updateInterest(Connection& connection);
 
+  // One turn of this loop's timer. Runs the expiry sampler against this loop's
+  // own shard, and re-arms the listener if it was throttled for want of
+  // descriptors. Two duties on one timer, because the second is not
+  // latency-sensitive and a second timer would be a second lifetime to get
+  // right.
+  void onTick();
+
+  // accept() was refused a descriptor. EAGAIN means the backlog is empty and
+  // the loop may sleep; EMFILE means it is NOT empty and there was nothing to
+  // accept into, so under level-triggered epoll retrying is a spin that never
+  // ends. Drop the interest and let a tick put it back.
+  void throttleListener();
+  void armListener();
+
   // epoll_event.data carries the fd, never a pointer. Two reasons, both real:
   // one batch from epoll_wait can contain an event for a connection that an
   // earlier event in the same batch closed, so a pointer would be a
@@ -100,6 +114,9 @@ class Loop {
   LoopStats stats_;
   std::uint64_t next_conn_id_ = 0;
   UniqueFd wake_fd_;
+  // Ticks this loop, for sampled expiry and for un-throttling the listener.
+  UniqueFd timer_fd_;
+  bool listener_throttled_ = false;
   std::uint16_t port_ = 0;
 
 

@@ -16,7 +16,23 @@
 namespace shardkv {
 namespace {
 constexpr std::size_t kReadChunk = 16 * 1024;
-}
+
+// Backpressure. Two watermarks rather than one, because a single threshold
+// oscillates: a connection that drained one byte below it would be read from,
+// climb straight back over, and pause again, at one EPOLL_CTL_MOD per byte.
+//
+// The gap is what turns that into one pause and one resume. See
+// docs/adr/0010-backpressure-is-two-watermarks-and-never-a-disconnect.md
+constexpr std::size_t kWriteHighWatermark = 1024 * 1024;
+constexpr std::size_t kWriteLowWatermark = 256 * 1024;
+
+// The invariant that keeps a paused connection from being registered for no
+// events at all and never woken again: pausing needs bytes pending, and
+// resuming happens while bytes are still pending, so a paused connection always
+// wants EPOLLOUT. A low watermark at or above the high one would break it.
+static_assert(kWriteLowWatermark < kWriteHighWatermark,
+              "the low watermark must leave a paused connection something to write");
+}  // namespace
 
 Connection::Connection(UniqueFd fd, ShardRouter& router, LoopStats& stats,
                        std::uint64_t id)
@@ -52,6 +68,8 @@ bool Connection::onReadable() {
 bool Connection::onWritable() { return flush(); }
 
 bool Connection::wantsWrite() const { return !write_.empty(); }
+
+std::size_t Connection::pendingWriteBytes() const { return write_.size(); }
 
 bool Connection::drainInput() {
   for (;;) {
@@ -124,15 +142,31 @@ bool Connection::flush() {
       // Socket full. The loop registers EPOLLOUT because wantsWrite() is now
       // true, and drops it again once this drains.
       ++stats_->short_writes;
+      updateBackpressure();
       return true;
     }
     if (errno == EPIPE || errno == ECONNRESET) ++stats_->peer_gone_writes;
     return false;  // the peer is gone; nothing left to do but close
   }
 
+  updateBackpressure();
+
   // Close only once the terminal slot has actually gone out, and only once
   // nothing is still outstanding: a reply may yet arrive from another shard.
   return !(close_after_flush_ && slots_.idle());
+}
+
+// What backpressure measures is the residual after the send attempt, not the
+// peak before it. A burst of replies the socket swallowed whole leaves nothing
+// pending and is no reason to stop reading; pausing on the peak would throttle
+// a connection that is keeping up perfectly.
+void Connection::updateBackpressure() {
+  if (!read_paused_ && write_.size() >= kWriteHighWatermark) {
+    read_paused_ = true;
+    ++stats_->read_pauses;
+  } else if (read_paused_ && write_.size() <= kWriteLowWatermark) {
+    read_paused_ = false;
+  }
 }
 
 }  // namespace shardkv

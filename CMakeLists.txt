@@ -71,7 +71,7 @@ endif()
 
 # One binary per area, so a failure names the area before it names the case.
 foreach(area parser encoder store expiry dispatch unique_fd integration
-                mpsc slots routing sharding)
+                mpsc slots routing sharding buffer)
   add_executable(${area}_test tests/${area}_test.cc)
   target_link_libraries(${area}_test PRIVATE shardkv_lib GTest::gtest_main)
   target_include_directories(${area}_test PRIVATE tests)

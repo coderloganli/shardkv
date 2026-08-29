@@ -61,6 +61,10 @@ std::string encodeAggregate(const Aggregate& aggregate) {
         body += "loop" + n + "_short_writes:" + part(InfoField::kShortWrites, i) + "\r\n";
         body += "loop" + n + "_peer_gone_writes:" +
                 part(InfoField::kPeerGoneWrites, i) + "\r\n";
+        body += "loop" + n + "_read_pauses:" + part(InfoField::kReadPauses, i) +
+                "\r\n";
+        body += "loop" + n + "_accept_failures:" +
+                part(InfoField::kAcceptFailures, i) + "\r\n";
         body += "loop" + n + "_cross_shard_requests:" +
                 part(InfoField::kCrossShardRequests, i) + "\r\n";
         body += "loop" + n + "_pinned:" + part(InfoField::kPinned, i) + "\r\n";
