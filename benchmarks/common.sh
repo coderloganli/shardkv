@@ -127,6 +127,18 @@ bench_wait_for_port() {
   return 1
 }
 
+# Nothing may already be answering on a port we are about to claim.
+#
+# A stale server, a concurrent run, or a forgotten manual session would answer
+# PING just as ours does, and the scripts would benchmark it and report the
+# numbers as this build's. Checked before starting rather than after, because
+# afterwards the two are indistinguishable.
+bench_require_free_port() { # port what
+  if redis-cli -p "$1" ping > /dev/null 2>&1; then
+    bench_die "something is already answering on port $1; refusing to benchmark it as if it were $2"
+  fi
+}
+
 # A ThreadSanitizer build will not start under an address space randomised with
 # 32 bits of entropy, which is the default on Ubuntu 24.04 kernels:
 #
@@ -149,11 +161,17 @@ bench_launcher() {
 bench_start_shardkv() { # [shards]
   local shards="${1:-${BENCH_SHARDS}}"
   [[ -x "${BUILD_DIR}/shardkv" ]] || bench_die "no ${BUILD_DIR}/shardkv -- build first"
+  bench_require_free_port "${BENCH_SHARDKV_PORT}" shardkv
   # Unquoted on purpose: empty on an ordinary build, and two words on a thread
   # build, where it must reach execve as separate arguments.
   # shellcheck disable=SC2046
+  # BENCH_PINNED is what environment.sh records, so it has to be what actually
+  # happens. A field that is present and wrong is worse than one that is
+  # missing: it reads as a record of the run.
+  local pin=()
+  [[ "${BENCH_PINNED:-no}" == "yes" ]] && pin=(--pin)
   $(bench_launcher) "${BUILD_DIR}/shardkv" --port "${BENCH_SHARDKV_PORT}" \
-    --shards "${shards}" > /dev/null 2>&1 &
+    --shards "${shards}" "${pin[@]}" > /dev/null 2>&1 &
   BENCH_SHARDKV_PID=$!
   BENCH_PIDS+=("${BENCH_SHARDKV_PID}")
   bench_wait_for_port "${BENCH_SHARDKV_PORT}" || bench_die "shardkv did not come up"
@@ -161,6 +179,7 @@ bench_start_shardkv() { # [shards]
 
 bench_start_redis() {
   command -v redis-server > /dev/null 2>&1 || bench_die "no redis-server: the control group cannot run"
+  bench_require_free_port "${BENCH_REDIS_PORT}" redis-server
   # Persistence off on both sides: this measures the request path, and a
   # background save would put one server's fork in the other's numbers.
   redis-server --port "${BENCH_REDIS_PORT}" --save '' --appendonly no \
@@ -200,6 +219,13 @@ bench_run() { # port args...
 
 # Every figure in a results file is a number, so that a reader -- and the smoke
 # test -- can tell a measurement from a placeholder. Booleans are 0 and 1.
+#
+# It refuses anything that is not one. A blank or a stray word reaching a results
+# file is the failure this whole step exists to prevent, and the caller that
+# produced it is the one that should die, not the reader who finds it later.
 bench_number() { # name value
+  case "$2" in
+    ''|*[!0-9.+-]*) bench_die "refusing to record '$1' as '$2': that is not a number" ;;
+  esac
   printf '%s: %s\n' "$1" "$2"
 }

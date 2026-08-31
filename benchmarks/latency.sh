@@ -28,16 +28,20 @@ record() { # label port
   text="$(bench_run "${port}" -t get,set -n "${requests}" -c 1)"
   printf '%s\n' "${text}" >> "${raw}"
 
-  local field
-  for field in p50 p95 p99; do
-    local value
-    value="$(printf '%s\n' "${text}" | parse_percentile "${field}")" \
-      || bench_die "${label}: no latency summary"
-    bench_number "${label}_${field}" "${value}" >> "${out}"
+  # Per operation, for the same reason throughput.sh does: -t get,set is two
+  # tests and two summaries.
+  local op field value p999
+  for op in SET GET; do
+    local key="${label}_$(printf '%s' "${op}" | tr 'A-Z' 'a-z')"
+    for field in p50 p95 p99; do
+      value="$(printf '%s\n' "${text}" | parse_percentile "${field}" "${op}")" \
+        || bench_die "${label} ${op}: no latency summary"
+      bench_number "${key}_${field}" "${value}" >> "${out}"
+    done
+    p999="$(printf '%s\n' "${text}" | parse_p999 "${op}")" \
+      || bench_die "${label} ${op}: no percentile block"
+    bench_number "${key}_p999" "${p999}" >> "${out}"
   done
-  local p999
-  p999="$(printf '%s\n' "${text}" | parse_p999)" || bench_die "${label}: no percentile block"
-  bench_number "${label}_p999" "${p999}" >> "${out}"
 }
 
 bench_number requests "${requests}" >> "${out}"

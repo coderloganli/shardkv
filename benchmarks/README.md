@@ -27,7 +27,7 @@ Each script is runnable on its own and writes its own results directory.
 
 | script | what it measures |
 |---|---|
-| `throughput.sh` | `-t get,set -n 1000000 -c 50`, with and without `-P 16`, both servers |
+| `throughput.sh` | `-t get,set -n 1000000 -c 50`, both servers: with and without `-P 16`, and with the generator single-threaded (as §8.1 specifies) and given `--threads` |
 | `latency.sh` | the distribution at one connection with no pipelining, both servers |
 | `cross_shard.sh` | what an extra hop between threads costs a request |
 | `memory.sh` | resident memory after a million keys, both servers |
@@ -90,6 +90,19 @@ Two details that are not decoration:
   hence the counts, minima and maxima, and the `ranges_overlap` flag.
 
 `docs/adr/0015-the-cross-shard-penalty-is-observed-not-arranged.md` has the rest.
+
+## The generator is part of the experiment
+
+`redis-benchmark` is single-threaded unless `--threads` says otherwise, so
+`-c 50` is fifty connections through one client thread — and that thread
+saturates around 45,000 requests a second, before eight loops do. Measured as
+§8.1 writes it, shardkv therefore comes out slower than Redis, which is a fact
+about the benchmark rather than about the server.
+
+`throughput.sh` runs it both ways and records both, under separate names
+(`..._p1_...` and `..._p1_t8_...`). Neither is the true number: the first is
+the instrument's ceiling, the second takes cores from the server on a machine
+that has eight. Reporting only one of them would be reporting a choice.
 
 ## Reading the numbers
 

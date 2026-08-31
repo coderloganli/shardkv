@@ -34,8 +34,15 @@ load() { # label port pid
   [[ -n "${baseline}" ]] || bench_die "${label}: could not read RSS for pid ${pid}"
 
   printf '\n===== %s =====\n' "${label}" >> "${raw}"
-  bench_run "${port}" -t set -n "${BENCH_REQUESTS}" -r "${BENCH_REQUESTS}" \
-    -d "${BENCH_VALUE_BYTES}" -c "${BENCH_CLIENTS}" >> "${raw}"
+  local text
+  # Checked, not assumed: a load that failed leaves the RSS reading meaning
+  # nothing, and the script would go on to report it as "after loading".
+  text="$(bench_run "${port}" -t set -n "${BENCH_REQUESTS}" -r "${BENCH_REQUESTS}" \
+    -d "${BENCH_VALUE_BYTES}" -c "${BENCH_CLIENTS}")" \
+    || bench_die "${label}: the load generator failed"
+  printf '%s\n' "${text}" >> "${raw}"
+  printf '%s\n' "${text}" | parse_throughput SET > /dev/null \
+    || bench_die "${label}: the load did not complete"
 
   loaded="$(bench_rss_kb "${pid}")"
   [[ -n "${loaded}" ]] || bench_die "${label}: the server died during loading"
@@ -43,7 +50,10 @@ load() { # label port pid
   bench_number "${label}_baseline_rss_kb" "${baseline}" >> "${out}"
   bench_number "${label}_loaded_rss_kb"   "${loaded}"   >> "${out}"
   bench_number "${label}_growth_rss_kb"   "$((loaded - baseline))" >> "${out}"
-  bench_number "${label}_keys"            "$(redis-cli -p "${port}" dbsize 2>/dev/null | tr -d '\r')" >> "${out}"
+  local keys
+  keys="$(redis-cli -p "${port}" dbsize 2>/dev/null | tr -d '\r')"
+  [[ -n "${keys}" ]] || bench_die "${label}: DBSIZE did not answer, so the load cannot be verified"
+  bench_number "${label}_keys" "${keys}" >> "${out}"
 }
 
 bench_number requests    "${BENCH_REQUESTS}"     >> "${out}"

@@ -56,6 +56,15 @@ check_zero_exit() { # name status
 # shellcheck source=/dev/null
 if [[ -f "${HERE}/parse.sh" ]]; then source "${HERE}/parse.sh"; fi
 
+# bench_number lives in common.sh, which starts servers and installs traps when
+# sourced. Probing it in a subshell keeps this file's own process out of that.
+bench_number_probe() { # name value
+  ( set -uo pipefail
+    # shellcheck source=/dev/null
+    source "${HERE}/common.sh" > /dev/null 2>&1
+    bench_number "$1" "$2" )
+}
+
 echo "== the classification rule (cases 10-13) =="
 
 # 10 -- the split is at half the request count, not at zero: INFO is itself a
@@ -149,6 +158,50 @@ check_nonzero_exit "20b  and the measurement script fails with it" "${st}"
 results_after="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
 check_eq "20c  leaving no results directory" "${results_before}" "${results_after}"
 
+echo "== two tests in one output (cases 24-26) =="
+
+# 24 -- `-t get,set` runs two tests and prints two summaries. Naming one must
+# give that one's figures, and the two must not be the same number.
+set_rps="$(parse_throughput SET < "${FIXTURES}/benchmark-get-set.txt")"
+get_rps="$(parse_throughput GET < "${FIXTURES}/benchmark-get-set.txt")"
+if [[ -n "${set_rps}" && -n "${get_rps}" ]]; then ok "24a  both sections parse"
+else bad "24a  sections" "SET='${set_rps}' GET='${get_rps}'"; fi
+if [[ "${set_rps}" != "${get_rps}" ]]; then ok "24b  and they are different runs"
+else bad "24b  sections" "SET and GET returned the same figure, so one of them is not being read"; fi
+
+set_p999="$(parse_p999 SET < "${FIXTURES}/benchmark-get-set.txt")"
+get_p999="$(parse_p999 GET < "${FIXTURES}/benchmark-get-set.txt")"
+if [[ -n "${set_p999}" && -n "${get_p999}" ]]; then ok "24c  p999 per section"
+else bad "24c  p999" "SET='${set_p999}' GET='${get_p999}'"; fi
+
+# 25 -- THE CASE THAT WOULD HAVE CAUGHT THE PUBLISHED ERROR. Asked for a figure
+# without saying which test, on output that holds two, the parser must refuse.
+# Returning the first is what put SET numbers under a "GET/SET" heading.
+out="$(parse_throughput < "${FIXTURES}/benchmark-get-set.txt" 2>&1)"; st=$?
+check_nonzero_exit "25a  an unnamed section is ambiguous, not the first one" "${st}"
+check_eq "25b  and it yields no number" "" "$(parse_throughput < "${FIXTURES}/benchmark-get-set.txt" 2>/dev/null)"
+out="$(parse_percentile p50 < "${FIXTURES}/benchmark-get-set.txt" 2>&1)"; st=$?
+check_nonzero_exit "25c  the same for percentiles" "${st}"
+
+# 26 -- a section that is not there is an error, not an empty answer.
+out="$(parse_throughput NOSUCH < "${FIXTURES}/benchmark-get-set.txt" 2>&1)"; st=$?
+check_nonzero_exit "26a  an unknown section is refused" "${st}"
+# and a single-test output still parses without naming anything
+check_eq "26b  one summary needs no section name" "49504.95" \
+         "$(parse_throughput < "${FIXTURES}/benchmark-get.txt")"
+
+echo "== figures must be figures (case 27) =="
+
+# 27 -- a blank or a stray word reaching a results file is the failure this whole
+# step exists to prevent, so the recorder refuses it rather than the reader
+# discovering it later.
+out="$(bench_number_probe 'x' '' 2>&1)"; st=$?
+check_nonzero_exit "27a  an empty value is refused" "${st}"
+out="$(bench_number_probe 'x' 'nan' 2>&1)"; st=$?
+check_nonzero_exit "27b  a word is refused" "${st}"
+out="$(bench_number_probe 'x' '12.5' 2>&1)"; st=$?
+check_zero_exit "27c  a number is accepted" "${st}"
+
 echo "== the scripts, end to end (cases 21-23) =="
 
 smoke_env=(BENCH_REQUESTS=400 BENCH_CLIENTS=2 BENCH_ROUNDS=1)
@@ -192,16 +245,65 @@ for script in throughput.sh latency.sh cross_shard.sh memory.sh run-all.sh; do
   check_eq "22b  ${script} leaves nothing behind" "${before}" "${after}"
 done
 
+# 28 -- the aggregate rule, at the point where it is hardest to hold. Each
+# measurement script publishes a directory of its own, so a failure in a LATER
+# one could strand the earlier ones -- complete directories, indistinguishable
+# from a finished run. Provoked by making the last measurement impossible: a
+# shard count of one, which cross_shard.sh must refuse.
+before="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+env "${smoke_env[@]}" BENCH_SHARDS=1 "${HERE}/run-all.sh" > /dev/null 2>&1; st=$?
+after="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+check_nonzero_exit "28a  run-all fails when a later measurement cannot run" "${st}"
+check_eq "28b  and the earlier ones are not left behind" "${before}" "${after}"
+
 # 23 -- both servers loaded the same way, and RSS reported for what it is.
 if [[ -n "${latest}" && -s "${latest}/memory.txt" ]]; then
   mem="$(cat "${latest}/memory.txt")"
   for field in requests keyspace value_bytes \
-               shardkv_baseline_rss_kb shardkv_loaded_rss_kb \
-               redis_baseline_rss_kb redis_loaded_rss_kb; do
-    check_contains "23   memory.txt records ${field}" "${mem}" "${field}"
+               shardkv_baseline_rss_kb shardkv_loaded_rss_kb shardkv_keys \
+               redis_baseline_rss_kb redis_loaded_rss_kb redis_keys; do
+    check_contains "23a  memory.txt records ${field}" "${mem}" "${field}"
   done
+
+  field_of() { printf '%s\n' "${mem}" | sed -n "s/^$1: *//p"; }
+
+  # Both servers actually took the load, rather than the script recording a
+  # baseline twice: DBSIZE answered with a number, and a positive one.
+  for label in shardkv redis; do
+    keys="$(field_of "${label}_keys")"
+    if [[ "${keys}" =~ ^[0-9]+$ ]] && (( keys > 0 )); then
+      ok "23b  ${label} actually holds keys (${keys})"
+    else
+      bad "23b  ${label}_keys" "'${keys}' is not a positive number, so the load is unverified"
+    fi
+  done
+
+  # And they were loaded identically. A memory comparison between two different
+  # datasets would be a comparison of nothing.
+  sk="$(field_of shardkv_keys)"; rd="$(field_of redis_keys)"
+  if [[ "${sk}" =~ ^[0-9]+$ && "${rd}" =~ ^[0-9]+$ ]]; then
+    spread=$(( sk > rd ? sk - rd : rd - sk ))
+    allowed=$(( sk / 20 + 5 ))
+    if (( spread <= allowed )); then ok "23c  both servers received the same load"
+    else bad "23c  load" "shardkv holds ${sk} keys and redis ${rd}: not the same dataset"; fi
+  fi
 else
   bad "23   memory.txt" "not produced, so nothing to check"
+fi
+
+echo "== the environment record matches the run (case 29) =="
+
+# 29 -- a field that is present and WRONG is worse than one that is missing: it
+# reads as a record of what happened. BENCH_PINNED is the one that can drift,
+# because environment.sh records it and common.sh has to act on it.
+if [[ -n "${latest}" ]]; then
+  recorded="$(sed -n 's/^pinned: *//p' "${latest}/environment.txt")"
+  check_eq "29a  pinned is recorded as the run was made" "no" "${recorded}"
+fi
+if grep -q -- '--pin' "${HERE}/common.sh"; then
+  ok "29b  and BENCH_PINNED can actually reach the server"
+else
+  bad "29b  pinned" "environment.sh records it but common.sh never passes --pin"
 fi
 
 echo

@@ -13,11 +13,76 @@
 # answer. A parser that returns an empty string for a run that died halfway puts
 # a blank in a results file, and a blank in a results file looks like a
 # measurement.
+#
+# THE AMBIGUITY RULE, which exists because ignoring it produced a wrong README.
+# `redis-benchmark -t get,set` runs two tests and prints two summaries, each
+# under its own `====== SET ======` / `====== GET ======` heading. Every parser
+# here therefore takes an optional section name, and **refuses when the output
+# holds more than one summary and no section was named** rather than returning
+# the first. Silently returning the first is what labelled SET figures as
+# "GET/SET" in a published table.
+
+# The slice of output belonging to one test, or the whole thing when no section
+# is named. Fails when the name is not there.
+_section() { # [name]
+  local want="${1:-}"
+  if [[ -z "${want}" ]]; then cat; return 0; fi
+
+  # The heading arrives at the END of a line, not on one of its own:
+  # redis-benchmark draws its progress with carriage returns, so everything it
+  # printed while the test ran and the `====== SET ======` that closes it are one
+  # line as far as awk is concerned. Hence the match on the tail rather than on
+  # the whole line -- anchoring at the start finds nothing at all.
+  awk -v want="${want}" '
+    {
+      line = $0
+      sub(/^.*/, "", line)          # keep only what survived the progress redraw
+    }
+    line ~ /^ *=+ .* =+ *$/ {
+      name = line
+      gsub(/^ *=+ */, "", name)
+      gsub(/ *=+ *$/, "", name)
+      in_section = (name == want)
+      if (in_section) found = 1
+      next
+    }
+    in_section { print }
+    END { exit !found }
+  '
+}
+
+# How many "throughput summary" lines the output holds. More than one means the
+# caller must say which test it wants.
+_summary_count() { grep -c '^ *throughput summary:' || true; }
+
+_resolve() { # section  -> prints the slice, or fails
+  local section="${1:-}"
+  local text
+  text="$(cat)"
+
+  if [[ -z "${section}" ]]; then
+    local n
+    n="$(printf '%s\n' "${text}" | _summary_count)"
+    if (( n > 1 )); then
+      echo "parse: this output holds ${n} test summaries; name one (e.g. SET or GET) rather than taking the first" >&2
+      return 1
+    fi
+    printf '%s\n' "${text}"
+    return 0
+  fi
+
+  if ! printf '%s\n' "${text}" | _section "${section}"; then
+    echo "parse: no section named '${section}' in this output" >&2
+    return 1
+  fi
+}
 
 # The throughput line: "  throughput summary: 49504.95 requests per second"
-parse_throughput() {
-  local value
-  value="$(sed -n 's/^ *throughput summary: *\([0-9.]*\) requests per second/\1/p' | head -1)"
+parse_throughput() { # [section]
+  local slice value
+  slice="$(_resolve "${1:-}")" || return 1
+  value="$(printf '%s\n' "${slice}" \
+    | sed -n 's/^ *throughput summary: *\([0-9.]*\) requests per second/\1/p' | head -1)"
   if [[ -z "${value}" ]]; then
     echo "parse_throughput: no throughput summary line in this output" >&2
     return 1
@@ -32,7 +97,7 @@ parse_throughput() {
 #
 # Note what is NOT here: p999. redis-benchmark 7.0.15's summary does not carry
 # it and neither does --csv; parse_p999 below digs it out of the detailed block.
-parse_percentile() {
+parse_percentile() { # want [section]
   local want="$1"
   local column
   case "${want}" in
@@ -48,8 +113,9 @@ parse_percentile() {
       ;;
   esac
 
-  local value
-  value="$(awk -v col="${column}" '
+  local slice value
+  slice="$(_resolve "${2:-}")" || return 1
+  value="$(printf '%s\n' "${slice}" | awk -v col="${column}" '
     /latency summary/ { seen = 1; next }
     seen && /^ *[0-9]/ { print $col; exit }
   ' | tr -d ' ')"
@@ -68,13 +134,14 @@ parse_percentile() {
 # The first entry at or above 99.9 percent. redis-benchmark prints rising
 # percentiles, so the first one to reach 99.9 is the tightest bound it measured
 # on that tail -- taking a later line would report a looser number as p999.
-parse_p999() {
-  local value
+parse_p999() { # [section]
+  local slice value
+  slice="$(_resolve "${1:-}")" || return 1
   # Field splitting rather than a capturing match(): a three-argument match() is
   # a gawk extension, and the image has mawk. A line reads
   #   99.902% <= 0.735 milliseconds (cumulative count 19982)
   # so the percentage is $1 with its sign attached and the figure is $3.
-  value="$(awk '
+  value="$(printf '%s\n' "${slice}" | awk '
     $2 == "<=" && $4 == "milliseconds" {
       pct = $1
       sub(/%$/, "", pct)

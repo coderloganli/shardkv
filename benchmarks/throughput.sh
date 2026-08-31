@@ -39,16 +39,22 @@ record() {
   text="$(bench_run "${port}" "${args[@]}")"
   printf '%s\n' "${text}" >> "${raw}"
 
-  local rps p50 p99 p999
-  rps="$(printf '%s\n' "${text}" | parse_throughput)"  || bench_die "${label}: no throughput in the output"
-  p50="$(printf '%s\n' "${text}" | parse_percentile p50)" || bench_die "${label}: no latency summary"
-  p99="$(printf '%s\n' "${text}" | parse_percentile p99)" || bench_die "${label}: no latency summary"
-  p999="$(printf '%s\n' "${text}" | parse_p999)"       || bench_die "${label}: no percentile block"
+  # SET and GET are two tests and two summaries. Naming them is not tidiness:
+  # taking whichever summary came first silently reported SET figures under a
+  # "GET/SET" heading once already.
+  local op rps p50 p99 p999
+  for op in SET GET; do
+    local key="${label}_${suffix}_$(printf '%s' "${op}" | tr 'A-Z' 'a-z')"
+    rps="$(printf '%s\n' "${text}" | parse_throughput "${op}")"  || bench_die "${label} ${op}: no throughput in the output"
+    p50="$(printf '%s\n' "${text}" | parse_percentile p50 "${op}")" || bench_die "${label} ${op}: no latency summary"
+    p99="$(printf '%s\n' "${text}" | parse_percentile p99 "${op}")" || bench_die "${label} ${op}: no latency summary"
+    p999="$(printf '%s\n' "${text}" | parse_p999 "${op}")"       || bench_die "${label} ${op}: no percentile block"
 
-  bench_number "${label}_${suffix}_rps"  "${rps}"  >> "${out}"
-  bench_number "${label}_${suffix}_p50"  "${p50}"  >> "${out}"
-  bench_number "${label}_${suffix}_p99"  "${p99}"  >> "${out}"
-  bench_number "${label}_${suffix}_p999" "${p999}" >> "${out}"
+    bench_number "${key}_rps"  "${rps}"  >> "${out}"
+    bench_number "${key}_p50"  "${p50}"  >> "${out}"
+    bench_number "${key}_p99"  "${p99}"  >> "${out}"
+    bench_number "${key}_p999" "${p999}" >> "${out}"
+  done
 }
 
 bench_number requests "${BENCH_REQUESTS}" >> "${out}"
