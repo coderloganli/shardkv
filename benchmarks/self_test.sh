@@ -215,6 +215,13 @@ smoke_env=(BENCH_REQUESTS=400 BENCH_CLIENTS=2 BENCH_ROUNDS=1)
 
 # 21 -- complete or absent. "The directory exists" is not the assertion.
 env "${smoke_env[@]}" "${HERE}/run-all.sh" > "${SCRATCH}/run-all.log" 2>&1; st=$?
+if [[ "${st}" -ne 0 ]]; then
+  # Same reason environment.sh's message is printed above: a bare "it failed"
+  # sends whoever reads the CI log hunting for something the script has already
+  # said. The scripts explain themselves; the test has to stop eating it.
+  printf '     run-all.sh said:\n'
+  sed 's/^/       /' "${SCRATCH}/run-all.log" | tail -25
+fi
 check_zero_exit "21a  run-all.sh at smoke size succeeds" "${st}"
 
 latest="$(ls -1d "${BENCH_RESULTS}"/*/ 2>/dev/null | sort | tail -1)"

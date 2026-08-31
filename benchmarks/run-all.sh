@@ -24,8 +24,18 @@ mkdir -p "${staging}"
 
 for measurement in throughput latency cross_shard memory; do
   script="${BENCH_HERE}/${measurement}.sh"
-  produced="$(BENCH_RESULTS="${staging}" "${script}")" \
-    || bench_die "run-all: ${measurement}.sh failed"
+  # The child's own message is kept and repeated. Without this a failure here
+  # reads as "run-all: memory.sh failed" and the reason -- which the child
+  # printed and this shell discarded -- is gone.
+  if ! produced="$(BENCH_RESULTS="${staging}" "${script}" 2>"${BENCH_WORK}/${measurement}.err")"; then
+    printf 'run-all: %s.sh failed, and said:\n' "${measurement}" >&2
+    sed 's/^/  /' "${BENCH_WORK}/${measurement}.err" >&2
+    bench_die "run-all: stopping; nothing is recorded"
+  fi
+  # A child that succeeded may still have had something to say -- the penalty
+  # report declining, for instance -- and that belongs in the log too.
+  [[ -s "${BENCH_WORK}/${measurement}.err" ]] && sed 's/^/  /' "${BENCH_WORK}/${measurement}.err" >&2
+  rm -f "${BENCH_WORK}/${measurement}.err"
   [[ -d "${produced}" ]] || bench_die "run-all: ${measurement}.sh produced no results directory"
 
   cp "${produced}/${measurement}.raw" "${BENCH_WORK}/" \
