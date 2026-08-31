@@ -84,6 +84,21 @@ bench_cleanup() {
     [[ -n "${pid}" ]] && wait "${pid}" 2>/dev/null
   done
   BENCH_PIDS=()
+
+  # And wait until the ports actually stop answering.
+  #
+  # kill() returns as soon as the signal is delivered, not when the process has
+  # gone. The next run refuses to start on a port something is already answering
+  # on -- deliberately, so it cannot measure a stranger's server -- so leaving
+  # before the socket closes makes two runs in a row fail for no reason. Waiting
+  # here keeps that check strict without making it flaky.
+  local port
+  for port in "${BENCH_SHARDKV_PORT}" "${BENCH_REDIS_PORT}"; do
+    for _ in $(seq 1 100); do
+      redis-cli -p "${port}" ping > /dev/null 2>&1 || break
+      sleep 0.1
+    done
+  done
   # Removed unconditionally: bench_finish moves the directory out first, so
   # anything still here is an incomplete run and must not survive.
   [[ -n "${BENCH_WORK}" ]] && rm -rf "${BENCH_WORK}"

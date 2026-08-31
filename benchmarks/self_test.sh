@@ -107,6 +107,13 @@ echo "== the environment block (cases 14-16) =="
 
 # 14
 env_out="$("${HERE}/environment.sh" 2>&1)"; st=$?
+if [[ "${st}" -ne 0 ]]; then
+  # Printed, because a bare "it failed" sent me hunting through a CI log for
+  # something the script had already said. The first time this fired, the reason
+  # was "Permission denied" -- see case 30.
+  printf '     environment.sh said:\n'
+  printf '       %s\n' "${env_out}"
+fi
 check_zero_exit "14a  environment.sh succeeds" "${st}"
 for field in cpu_model cpu_cores kernel compiler compiler_version build_type \
              redis_server_version redis_benchmark_version same_machine pinned \
@@ -290,6 +297,22 @@ if [[ -n "${latest}" && -s "${latest}/memory.txt" ]]; then
 else
   bad "23   memory.txt" "not produced, so nothing to check"
 fi
+
+echo "== the scripts are executable (case 30) =="
+
+# 30 -- every one of these is invoked by path, by ctest, by run-all.sh, and by a
+# reader following the README. Without the executable bit they fail with
+# "Permission denied" and no output at all, which is exactly what happened: this
+# checkout has core.filemode=false, so a local `chmod +x` never reaches the
+# index and the file is committed 100644. It works locally and fails everywhere
+# else -- so the bit is asserted here rather than remembered.
+for script in common.sh cross_shard.sh environment.sh latency.sh memory.sh \
+              parse.sh run-all.sh self_test.sh throughput.sh; do
+  if [[ -x "${HERE}/${script}" ]]; then ok "30   ${script} is executable"
+  else bad "30   ${script}" "not executable; git update-index --chmod=+x benchmarks/${script}"; fi
+done
+if [[ -x "${HERE}/../scripts/soak.sh" ]]; then ok "30   scripts/soak.sh is executable"
+else bad "30   scripts/soak.sh" "not executable"; fi
 
 echo "== the environment record matches the run (case 29) =="
 
