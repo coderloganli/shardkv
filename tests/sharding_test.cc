@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <cstdint>
 #include <filesystem>
@@ -627,4 +628,159 @@ TEST(Sharding, BackpressureEngagesOnRepliesThatCameFromAnotherLoop) {
   slow.send("PING\r\n");
   EXPECT_EQ(readReply(slow), "+PONG\r\n")
       << "the connection never resumed being read from";
+}
+
+// ---------------------------------------------------------------------------
+// Cases 6-9 from the measure-and-deliver task.
+//
+// These live here rather than in bench_test.cc because they need the multi-loop
+// server and the INFO helpers this file already has. Cases 1-5, which only need
+// the tool, are in bench_test.cc.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+#ifndef SHARD_KEYS_PATH
+#error "SHARD_KEYS_PATH must name the built shard_keys binary; see CMakeLists.txt"
+#endif
+
+// The keys shard_keys prints for a shard. Deliberately the tool's answer and not
+// a locally computed one: case 6 is about whether the tool and the server agree.
+std::vector<std::string> keysFromTool(std::size_t shards, std::size_t shard,
+                                      std::size_t count) {
+  const std::string command = std::string(SHARD_KEYS_PATH) + " --shards " +
+                              std::to_string(shards) + " --shard " +
+                              std::to_string(shard) + " --count " +
+                              std::to_string(count);
+
+  std::vector<std::string> keys;
+  std::FILE* pipe = ::popen(command.c_str(), "r");
+  if (pipe == nullptr) {
+    ADD_FAILURE() << "could not run: " << command;
+    return keys;
+  }
+  char buffer[512];
+  while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    std::string line(buffer);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+    if (!line.empty()) keys.push_back(line);
+  }
+  ::pclose(pipe);
+  return keys;
+}
+
+// One INFO's own contribution to cross_shard_requests, measured rather than
+// predicted. INFO asks every shard for its key count, so reading the counter
+// adds to it -- see the note in docs/architecture.md. Everything below is
+// asserted against this number instead of against zero.
+long long calibrateInfoCost(Client& c) {
+  const long long a = fieldOf(infoOf(c), "cross_shard_requests");
+  const long long b = fieldOf(infoOf(c), "cross_shard_requests");
+  return b - a;
+}
+
+}  // namespace
+
+// 6 -- the case that matters for the whole benchmark. A tool that agreed only
+// with itself would pass cases 1-5 and still aim the load at the wrong shard.
+TEST(ShardKeys, TheToolAgreesWithARunningServer) {
+  const std::size_t shards = 4;
+  const std::size_t target = 2;
+  Running server(shards);
+  Client c(server.port());
+
+  const std::vector<std::string> keys = keysFromTool(shards, target, 40);
+  ASSERT_EQ(keys.size(), 40u) << "the tool did not produce the keys to test with";
+
+  for (const std::string& key : keys) {
+    c.send(resp({"SET", key, "v"}));
+    ASSERT_EQ(readReply(c), "+OK\r\n");
+  }
+
+  const std::string info = infoOf(c);
+  EXPECT_EQ(fieldOf(info, "shard" + std::to_string(target) + "_keys"), 40)
+      << "the server did not put the tool's keys where the tool said they went:\n"
+      << info;
+  for (std::size_t i = 0; i < shards; ++i) {
+    if (i == target) continue;
+    EXPECT_EQ(fieldOf(info, "shard" + std::to_string(i) + "_keys"), 0)
+        << "shard " << i << " received keys the tool claimed for shard " << target;
+  }
+}
+
+// 7 -- the instrument sits inside the experiment, so its cost is measured before
+// anything is asserted against it. Four shards, because at one shard INFO does
+// not fan out and this would prove nothing.
+TEST(CrossShardCounter, InfoOwnCostIsCalibratedNotPredicted) {
+  const std::size_t shards = 4;
+  Running server(shards);
+  Client c(server.port());
+
+  const long long first = calibrateInfoCost(c);
+  const long long second = calibrateInfoCost(c);
+
+  EXPECT_GT(first, 0) << "INFO on four shards must fan out and cost something";
+  EXPECT_EQ(first, second) << "INFO's cost is not stable, so it cannot be calibrated";
+  EXPECT_EQ(first, static_cast<long long>(shards - 1))
+      << "INFO should send one request to each shard but its own";
+}
+
+// 8 -- a run whose keys are all local. The delta must stay far below half the
+// request count, which is where the benchmark's classifier draws its line.
+TEST(CrossShardCounter, ALocalRunDoesNotMoveTheCounterBeyondInfosCost) {
+  const std::size_t shards = 4;
+  const int requests = 100;
+  Running server(shards);
+  Client c(server.port());
+
+  const long long info_cost = calibrateInfoCost(c);
+  ASSERT_GT(info_cost, 0);
+
+  const std::size_t mine = loopOf(c, shards);
+  const std::vector<std::string> keys = keysFromTool(shards, mine, 10);
+  ASSERT_FALSE(keys.empty());
+
+  const long long before = fieldOf(infoOf(c), "cross_shard_requests");
+  for (int i = 0; i < requests; ++i) {
+    c.send(resp({"GET", keys[static_cast<std::size_t>(i) % keys.size()]}));
+    readReply(c);
+  }
+  const long long after = fieldOf(infoOf(c), "cross_shard_requests");
+  const long long delta = after - before;
+
+  EXPECT_LE(delta, 2 * info_cost)
+      << "a local run sent cross-shard requests: " << delta;
+  EXPECT_LT(delta, requests / 2)
+      << "a local run would be classified as remote by the benchmark";
+}
+
+// 9 -- and a run whose keys are all remote, which must cost one message each.
+// Cases 8 and 9 together are what make "below half the request count means
+// local" a reading rather than a hope.
+TEST(CrossShardCounter, ARemoteRunMovesTheCounterOncePerRequest) {
+  const std::size_t shards = 4;
+  const int requests = 100;
+  Running server(shards);
+  Client c(server.port());
+
+  const long long info_cost = calibrateInfoCost(c);
+  ASSERT_GT(info_cost, 0);
+
+  const std::size_t mine = loopOf(c, shards);
+  const std::vector<std::string> keys = keysFromTool(shards, (mine + 1) % shards, 10);
+  ASSERT_FALSE(keys.empty());
+
+  const long long before = fieldOf(infoOf(c), "cross_shard_requests");
+  for (int i = 0; i < requests; ++i) {
+    c.send(resp({"GET", keys[static_cast<std::size_t>(i) % keys.size()]}));
+    readReply(c);
+  }
+  const long long after = fieldOf(infoOf(c), "cross_shard_requests");
+  const long long delta = after - before;
+
+  EXPECT_GE(delta, requests) << "a remote run did not send one request per command";
+  EXPECT_LE(delta, requests + 2 * info_cost)
+      << "more was sent than one request per command plus the instrument";
+  EXPECT_GE(delta, requests / 2)
+      << "a remote run would be classified as local by the benchmark";
 }
