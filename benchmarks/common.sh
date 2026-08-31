@@ -27,7 +27,20 @@ BENCH_RESULTS="${BENCH_RESULTS:-${BENCH_HERE}/results}"
 # §8.1's figures by default; smaller values make the scripts exercisable in a
 # few seconds, which is how the smoke test runs them. The same shape
 # scripts/soak.sh already uses.
+# The floor is not tuning, it is the difference between a measurement and a
+# division by zero. redis-benchmark reports elapsed time to hundredths of a
+# second, so a run that finishes inside that prints "inf requests per second" --
+# and the smoke configuration, which exists to exercise the scripts rather than
+# to measure anything, was fast enough against a real Redis on a quick machine to
+# do exactly that, intermittently. Requests below this are raised, and the raise
+# is announced rather than silent.
+BENCH_MIN_REQUESTS="${BENCH_MIN_REQUESTS:-5000}"
 BENCH_REQUESTS="${BENCH_REQUESTS:-1000000}"
+if (( BENCH_REQUESTS < BENCH_MIN_REQUESTS )); then
+  printf 'note: raising BENCH_REQUESTS from %s to %s, below which a run can finish too fast to be timed\n' \
+    "${BENCH_REQUESTS}" "${BENCH_MIN_REQUESTS}" >&2
+  BENCH_REQUESTS="${BENCH_MIN_REQUESTS}"
+fi
 BENCH_CLIENTS="${BENCH_CLIENTS:-50}"
 BENCH_ROUNDS="${BENCH_ROUNDS:-10}"
 BENCH_SHARDS="${BENCH_SHARDS:-$(nproc)}"

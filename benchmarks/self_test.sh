@@ -58,6 +58,14 @@ if [[ -f "${HERE}/parse.sh" ]]; then source "${HERE}/parse.sh"; fi
 
 # bench_number lives in common.sh, which starts servers and installs traps when
 # sourced. Probing it in a subshell keeps this file's own process out of that.
+# What common.sh's floor is set to, read the way a caller would see it.
+BENCH_MIN_REQUESTS_SEEN="$(
+  ( set -uo pipefail
+    # shellcheck source=/dev/null
+    source "${HERE}/common.sh" > /dev/null 2>&1
+    printf '%s' "${BENCH_MIN_REQUESTS}" )
+)"
+
 bench_number_probe() { # name value
   ( set -uo pipefail
     # shellcheck source=/dev/null
@@ -304,6 +312,23 @@ if [[ -n "${latest}" && -s "${latest}/memory.txt" ]]; then
 else
   bad "23   memory.txt" "not produced, so nothing to check"
 fi
+
+echo "== a run too fast to time (case 31) =="
+
+# 31 -- redis-benchmark divides the request count by the elapsed time, which it
+# measures to hundredths of a second, so a short enough run prints
+# "inf requests per second". That is not a very large throughput, it is the
+# absence of one, and it reached CI as the misleading "no throughput summary
+# line in this output" -- a line that was in fact right there.
+out="$(parse_throughput < "${FIXTURES}/benchmark-untimed.txt" 2>&1)"; st=$?
+check_nonzero_exit "31a  an untimed run is refused" "${st}"
+check_contains "31b  and the reason is named" "${out}" "too fast to be timed"
+check_eq "31c  and no figure is produced" "" \
+         "$(parse_throughput < "${FIXTURES}/benchmark-untimed.txt" 2>/dev/null)"
+
+# and the floor that stops the scripts provoking it
+if (( BENCH_MIN_REQUESTS_SEEN >= 1000 )); then ok "31d  the scripts keep a floor under the request count"
+else bad "31d  request floor" "BENCH_MIN_REQUESTS is ${BENCH_MIN_REQUESTS_SEEN}"; fi
 
 echo "== the scripts are executable (case 30) =="
 

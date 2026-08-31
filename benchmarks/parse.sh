@@ -36,7 +36,7 @@ _section() { # [name]
   awk -v want="${want}" '
     {
       line = $0
-      sub(/^.*/, "", line)          # keep only what survived the progress redraw
+      sub(/^.*\r/, "", line)          # keep only what survived the progress redraw
     }
     line ~ /^ *=+ .* =+ *$/ {
       name = line
@@ -81,10 +81,29 @@ _resolve() { # section  -> prints the slice, or fails
 parse_throughput() { # [section]
   local slice value
   slice="$(_resolve "${1:-}")" || return 1
-  value="$(printf '%s\n' "${slice}" \
-    | sed -n 's/^ *throughput summary: *\([0-9.]*\) requests per second/\1/p' | head -1)"
-  if [[ -z "${value}" ]]; then
+  local line
+  line="$(printf '%s\n' "${slice}" | sed -n 's/^ *throughput summary: *//p' | head -1)"
+  if [[ -z "${line}" ]]; then
     echo "parse_throughput: no throughput summary line in this output" >&2
+    return 1
+  fi
+
+  # A run short enough to finish inside the timer's resolution divides by a zero
+  # elapsed time, and redis-benchmark prints "inf requests per second". That is
+  # not a very large throughput, it is an absence of one, and it must never be
+  # recorded as a figure. Said in those words because "no throughput summary
+  # line" -- which is what this used to say -- sent a reader looking for a
+  # missing line that was in fact right there.
+  case "${line}" in
+    inf*|-inf*|nan*|-nan*)
+      echo "parse_throughput: the run finished too fast to be timed (redis-benchmark reports '${line%% *}'); use more requests" >&2
+      return 1
+      ;;
+  esac
+
+  value="$(printf '%s\n' "${line}" | sed -n 's/^\([0-9.]*\) requests per second.*/\1/p')"
+  if [[ -z "${value}" ]]; then
+    echo "parse_throughput: could not read a rate from 'throughput summary: ${line}'" >&2
     return 1
   fi
   printf '%s\n' "${value}"
