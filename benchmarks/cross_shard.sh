@@ -24,6 +24,12 @@ out="${BENCH_WORK}/cross_shard.txt"
 shards="${BENCH_SHARDS}"
 (( shards < 2 )) && bench_die "the cross-shard penalty needs at least two shards"
 
+# `rounds * shards` runs of this, so it is sized for the sweep rather than for
+# throughput -- but well above the classification floor of 100 * shards. See the
+# note in common.sh.
+requests="${BENCH_CROSS_REQUESTS}"
+(( requests > BENCH_REQUESTS )) && requests="${BENCH_REQUESTS}"
+
 bench_start_shardkv "${shards}"
 port="${BENCH_SHARDKV_PORT}"
 
@@ -40,7 +46,7 @@ locals=""
 remotes=""
 unknowns=0
 
-printf 'shards=%s requests=%s rounds=%s\n' "${shards}" "${BENCH_REQUESTS}" "${BENCH_ROUNDS}" >> "${raw}"
+printf 'shards=%s requests=%s rounds=%s\n' "${shards}" "${requests}" "${BENCH_ROUNDS}" >> "${raw}"
 
 for round in $(seq 1 "${BENCH_ROUNDS}"); do
   for shard in $(seq 0 $((shards - 1))); do
@@ -51,14 +57,14 @@ for round in $(seq 1 "${BENCH_ROUNDS}"); do
     redis-cli -p "${port}" set "${key}" v > /dev/null 2>&1
 
     before="$(counter)"
-    text="$(bench_run "${port}" -n "${BENCH_REQUESTS}" -c 1 -k 1 GET "${key}")"
+    text="$(bench_run "${port}" -n "${requests}" -c 1 -k 1 GET "${key}")"
     after="$(counter)"
     delta=$((after - before))
 
     latency="$(printf '%s\n' "${text}" | parse_percentile p50)" \
       || bench_die "round ${round} shard ${shard}: no latency summary"
 
-    verdict="$(classify_run "${delta}" "${BENCH_REQUESTS}" "${shards}")"
+    verdict="$(classify_run "${delta}" "${requests}" "${shards}")"
     printf 'round=%s shard=%s delta=%s p50=%s verdict=%s\n' \
       "${round}" "${shard}" "${delta}" "${latency}" "${verdict}" >> "${raw}"
 
@@ -79,7 +85,7 @@ mget_latency() { # label keys...
   printf '\n===== MGET %s =====\n' "${label}" >> "${raw}"
   local before after text
   before="$(counter)"
-  text="$(bench_run "${port}" -n "${BENCH_REQUESTS}" -c 1 -k 1 MGET "$@")"
+  text="$(bench_run "${port}" -n "${requests}" -c 1 -k 1 MGET "$@")"
   after="$(counter)"
   printf '%s\n' "${text}" >> "${raw}"
   printf 'mget_%s_delta=%s\n' "${label}" "$((after - before))" >> "${raw}"
@@ -100,7 +106,7 @@ for key in "${one_shard[@]}" "${spread[@]}"; do
   redis-cli -p "${port}" set "${key}" v > /dev/null 2>&1
 done
 
-bench_number requests "${BENCH_REQUESTS}" >> "${out}"
+bench_number requests "${requests}" >> "${out}"
 bench_number rounds   "${BENCH_ROUNDS}"   >> "${out}"
 bench_number shards   "${shards}"         >> "${out}"
 bench_number unclassified_runs "${unknowns}" >> "${out}"

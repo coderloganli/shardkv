@@ -1,0 +1,10 @@
+requests: 100000
+clients: 1
+shardkv_p50: 0.143
+shardkv_p95: 0.183
+shardkv_p99: 0.231
+shardkv_p999: 0.327
+redis_p50: 0.079
+redis_p95: 0.103
+redis_p99: 0.135
+redis_p999: 0.207

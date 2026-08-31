@@ -14,7 +14,15 @@
 BENCH_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_REPO="$(cd "${BENCH_HERE}/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${BENCH_REPO}/build}"
-BENCH_RESULTS="${BENCH_HERE}/results"
+# Overridable, and the smoke test overrides it.
+#
+# A smoke run produces a directory that looks exactly like a real measurement --
+# same files, same shape, four hundred requests instead of a million -- and
+# `bench_smoke` runs on every build, so without this the committed results
+# directory fills up with runs that are indistinguishable from the real one
+# until you open them. That is a worse failure than an untidy tree: it is a
+# results directory a reader cannot trust.
+BENCH_RESULTS="${BENCH_RESULTS:-${BENCH_HERE}/results}"
 
 # §8.1's figures by default; smaller values make the scripts exercisable in a
 # few seconds, which is how the smoke test runs them. The same shape
@@ -24,6 +32,40 @@ BENCH_CLIENTS="${BENCH_CLIENTS:-50}"
 BENCH_ROUNDS="${BENCH_ROUNDS:-10}"
 BENCH_SHARDS="${BENCH_SHARDS:-$(nproc)}"
 BENCH_PIPELINE="${BENCH_PIPELINE:-16}"
+
+# The million requests of §8.1 are a THROUGHPUT figure, at fifty connections.
+# Two of the four measurements are not that, and inheriting it would make them
+# absurd rather than thorough:
+#
+#   latency runs at ONE connection, where a million requests is hours of
+#   waiting to sharpen a percentile that a hundred thousand already resolves.
+#
+#   the cross-shard sweep runs `rounds * shards` times -- eighty runs at the
+#   defaults -- and each is a single connection. A million each is most of a day
+#   for a comparison of medians. What it does need is to stay clear of the
+#   classification floor of 100 * shards, and twenty thousand is far above it.
+#
+# Both are overridable, and each script caps its own size at BENCH_REQUESTS, so
+# a caller asking for one small size everywhere -- which is what the smoke test
+# does -- still gets it.
+BENCH_LATENCY_REQUESTS="${BENCH_LATENCY_REQUESTS:-100000}"
+BENCH_CROSS_REQUESTS="${BENCH_CROSS_REQUESTS:-20000}"
+
+# How many threads the LOAD GENERATOR gets.
+#
+# This is not a tuning knob, it is a correction. §8.1 specifies
+# `redis-benchmark -c 50` and says nothing about --threads, and redis-benchmark
+# is single-threaded unless told otherwise -- so the command as written puts
+# fifty connections through one client thread, and that thread saturates before
+# an eight-loop server does. Measured: it tops out around 45k requests a second
+# against shardkv, which is a fact about redis-benchmark, not about shardkv.
+#
+# So throughput is measured BOTH ways and both are reported: once exactly as
+# §8.1 writes it, and once with the generator given as many threads as the
+# server has shards. Neither is the "true" number -- the second takes cores away
+# from the server, on a machine that has only eight -- but reporting only the
+# first would publish the instrument's ceiling as the server's.
+BENCH_GENERATOR_THREADS="${BENCH_GENERATOR_THREADS:-${BENCH_SHARDS}}"
 
 # Ports well away from 6379 and 6380, so a soak or a manual session running
 # alongside is not measured by accident.

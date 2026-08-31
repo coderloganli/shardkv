@@ -1,0 +1,12 @@
+requests: 1000000
+keyspace: 1000000
+value_bytes: 3
+shards: 8
+shardkv_baseline_rss_kb: 3712
+shardkv_loaded_rss_kb: 97956
+shardkv_growth_rss_kb: 94244
+shardkv_keys: 632046
+redis_baseline_rss_kb: 12800
+redis_loaded_rss_kb: 86272
+redis_growth_rss_kb: 73472
+redis_keys: 631666

@@ -28,6 +28,12 @@ FIXTURES="${HERE}/fixtures"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "${SCRATCH}"' EXIT
 
+# Everything this file runs writes its results here, not into benchmarks/results.
+# A smoke run is shaped exactly like a real measurement and this runs on every
+# build; mixing the two would leave a committed results directory a reader has to
+# open a file to trust.
+export BENCH_RESULTS="${SCRATCH}/results"
+
 passed=0
 failed=0
 
@@ -136,11 +142,11 @@ check_eq "19b  and it produces no number" "" "$(parse_p999 < "${FIXTURES}/benchm
 out="$(parse_throughput < "${FIXTURES}/benchmark-truncated.txt" 2>&1)"; st=$?
 check_nonzero_exit "20a  no summary line is an error" "${st}"
 
-results_before="$(ls "${HERE}/results" 2>/dev/null | wc -l)"
+results_before="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
 BENCH_FIXTURE_OUTPUT="${FIXTURES}/benchmark-truncated.txt" \
   BENCH_REQUESTS=400 BENCH_CLIENTS=1 "${HERE}/throughput.sh" > /dev/null 2>&1; st=$?
 check_nonzero_exit "20b  and the measurement script fails with it" "${st}"
-results_after="$(ls "${HERE}/results" 2>/dev/null | wc -l)"
+results_after="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
 check_eq "20c  leaving no results directory" "${results_before}" "${results_after}"
 
 echo "== the scripts, end to end (cases 21-23) =="
@@ -151,7 +157,7 @@ smoke_env=(BENCH_REQUESTS=400 BENCH_CLIENTS=2 BENCH_ROUNDS=1)
 env "${smoke_env[@]}" "${HERE}/run-all.sh" > "${SCRATCH}/run-all.log" 2>&1; st=$?
 check_zero_exit "21a  run-all.sh at smoke size succeeds" "${st}"
 
-latest="$(ls -1d "${HERE}"/results/*/ 2>/dev/null | sort | tail -1)"
+latest="$(ls -1d "${BENCH_RESULTS}"/*/ 2>/dev/null | sort | tail -1)"
 if [[ -n "${latest}" ]]; then ok "21b  it produced a results directory"
 else bad "21b  results directory" "none was created"; fi
 
@@ -179,9 +185,9 @@ fi
 # 22 -- the rule this whole step exists to enforce, asserted for each script on
 # its own and not only through run-all.sh.
 for script in throughput.sh latency.sh cross_shard.sh memory.sh run-all.sh; do
-  before="$(ls "${HERE}/results" 2>/dev/null | wc -l)"
+  before="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
   env "${smoke_env[@]}" BUILD_DIR="${empty}" "${HERE}/${script}" > /dev/null 2>&1; st=$?
-  after="$(ls "${HERE}/results" 2>/dev/null | wc -l)"
+  after="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
   check_nonzero_exit "22a  ${script} fails when the environment cannot be recorded" "${st}"
   check_eq "22b  ${script} leaves nothing behind" "${before}" "${after}"
 done

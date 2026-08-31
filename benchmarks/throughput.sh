@@ -18,12 +18,23 @@ out="${BENCH_WORK}/throughput.txt"
 bench_start_shardkv
 bench_start_redis
 
-record() { # label port pipeline
-  local label="$1" port="$2" pipeline="$3"
+# label port pipeline generator-threads
+#
+# The last argument is why this measurement is taken twice. See the note on
+# BENCH_GENERATOR_THREADS in common.sh: `redis-benchmark -c 50` is fifty
+# connections through ONE client thread unless --threads says otherwise, and one
+# client thread saturates before an eight-loop server does.
+record() {
+  local label="$1" port="$2" pipeline="$3" threads="$4"
   local args=(-t get,set -n "${BENCH_REQUESTS}" -c "${BENCH_CLIENTS}")
   [[ "${pipeline}" -gt 1 ]] && args+=(-P "${pipeline}")
+  [[ "${threads}" -gt 1 ]] && args+=(--threads "${threads}")
 
-  printf '\n===== %s (pipeline %s) =====\n' "${label}" "${pipeline}" >> "${raw}"
+  local suffix="p${pipeline}"
+  [[ "${threads}" -gt 1 ]] && suffix="${suffix}_t${threads}"
+
+  printf '\n===== %s (pipeline %s, generator threads %s) =====\n' \
+    "${label}" "${pipeline}" "${threads}" >> "${raw}"
   local text
   text="$(bench_run "${port}" "${args[@]}")"
   printf '%s\n' "${text}" >> "${raw}"
@@ -34,19 +45,27 @@ record() { # label port pipeline
   p99="$(printf '%s\n' "${text}" | parse_percentile p99)" || bench_die "${label}: no latency summary"
   p999="$(printf '%s\n' "${text}" | parse_p999)"       || bench_die "${label}: no percentile block"
 
-  bench_number "${label}_p${pipeline}_rps"  "${rps}"  >> "${out}"
-  bench_number "${label}_p${pipeline}_p50"  "${p50}"  >> "${out}"
-  bench_number "${label}_p${pipeline}_p99"  "${p99}"  >> "${out}"
-  bench_number "${label}_p${pipeline}_p999" "${p999}" >> "${out}"
+  bench_number "${label}_${suffix}_rps"  "${rps}"  >> "${out}"
+  bench_number "${label}_${suffix}_p50"  "${p50}"  >> "${out}"
+  bench_number "${label}_${suffix}_p99"  "${p99}"  >> "${out}"
+  bench_number "${label}_${suffix}_p999" "${p999}" >> "${out}"
 }
 
 bench_number requests "${BENCH_REQUESTS}" >> "${out}"
 bench_number clients  "${BENCH_CLIENTS}"  >> "${out}"
 bench_number shards   "${BENCH_SHARDS}"   >> "${out}"
+bench_number generator_threads "${BENCH_GENERATOR_THREADS}" >> "${out}"
 
-record shardkv "${BENCH_SHARDKV_PORT}" 1
-record redis   "${BENCH_REDIS_PORT}"   1
-record shardkv "${BENCH_SHARDKV_PORT}" "${BENCH_PIPELINE}"
-record redis   "${BENCH_REDIS_PORT}"   "${BENCH_PIPELINE}"
+# Exactly as §8.1 writes it: one generator thread.
+record shardkv "${BENCH_SHARDKV_PORT}" 1 1
+record redis   "${BENCH_REDIS_PORT}"   1 1
+record shardkv "${BENCH_SHARDKV_PORT}" "${BENCH_PIPELINE}" 1
+record redis   "${BENCH_REDIS_PORT}"   "${BENCH_PIPELINE}" 1
+
+# And again with the generator able to keep up.
+if (( BENCH_GENERATOR_THREADS > 1 )); then
+  record shardkv "${BENCH_SHARDKV_PORT}" 1 "${BENCH_GENERATOR_THREADS}"
+  record redis   "${BENCH_REDIS_PORT}"   1 "${BENCH_GENERATOR_THREADS}"
+fi
 
 bench_finish

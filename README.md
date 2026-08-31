@@ -1,17 +1,22 @@
 # shardkv
 
+[![CI](https://github.com/coderloganli/shardkv/actions/workflows/ci.yml/badge.svg)](https://github.com/coderloganli/shardkv/actions/workflows/ci.yml)
+
 A concurrent in-memory key-value store in C++20, speaking the Redis wire protocol
 (RESP2). The architecture is shared-nothing: one epoll event loop per core, the
 keyspace partitioned across those cores, and no global lock anywhere on the
 request path.
 
-> **Status: work in progress.** The server runs N event loops on N threads with
-> the keyspace partitioned across them, answers the v1 command set correctly at
-> any shard count, and holds its resources: buffers compact, a client that will
-> not read its replies is stopped being read from, and expired keys nobody
-> touches again are reaped in the background. What is left is measurement. There
-> are no performance numbers here, and there will not be any until they have
-> been measured on a named machine with a reproducible script.
+> **Status: measured.** The server runs N event loops on N threads with the
+> keyspace partitioned across them, answers the v1 command set correctly at any
+> shard count, and holds its resources: buffers compact, a client that will not
+> read its replies is stopped being read from, and expired keys nobody touches
+> again are reaped in the background.
+>
+> The numbers below were produced by scripts in `benchmarks/`, on a named
+> machine, against `redis-server` on that same machine, with the predictions
+> written down and committed before the runs. **Two of the five predictions
+> failed, and those are the interesting part.**
 
 ## The idea
 
@@ -94,8 +99,10 @@ redis-cli -p 6380 PING
 Port 6380 rather than 6379, so a real `redis-server` can run alongside as the
 control group.
 
-There is a `Dockerfile` carrying the toolchain and `redis-tools`, which is how
-this is developed and how CI runs:
+There is a `Dockerfile` carrying the toolchain, `redis-tools` and
+`redis-server` — the last of these because every performance figure here is a
+comparison against Redis on the same machine. It is how this is developed and how
+CI runs:
 
 ```
 docker build -t shardkv-dev .
@@ -109,6 +116,137 @@ good on a container or a shared machine.
 Sanitizer builds are selected with `-DSHARDKV_SANITIZER=address` or `=thread`.
 The thread build additionally needs `--security-opt seccomp=unconfined` under
 Docker; `docs/architecture.md` says why.
+
+## What it measures out at
+
+Every figure here comes from `benchmarks/`, with its environment recorded beside
+it and a script anyone can rerun. **Read the two caveats before the tables** —
+they are what the figures mean.
+
+**The machine.** AMD Ryzen 7 7800X3D, 8 cores, no SMT; Linux
+6.6.87.2-microsoft-standard-WSL2 in a container on Docker Desktop; g++ 13.3.0,
+`-O2` via `CMAKE_BUILD_TYPE=Release`; `redis-server` and `redis-benchmark` both
+7.0.15; load generated on the same machine; threads not pinned. Eight shards.
+
+**What is not here, and why.** There is **no scaling curve and no profile.** The
+machine is virtualised and its PMU is unreachable, so a curve drawn on it would
+describe the hypervisor's scheduler as much as this architecture, and
+`perf`'s counters do not exist to be read. **No claim is made anywhere that
+throughput scales linearly, or in any particular way, with cores.** What replaces
+it is a control group under identical conditions —
+`docs/adr/0014-what-this-machine-can-and-cannot-measure.md` has the reasoning.
+
+### The load generator was the bottleneck, and finding that out was the point
+
+The technical document specifies `redis-benchmark -t get,set -n 1000000 -c 50`.
+Run exactly that and shardkv looks **slower** than Redis:
+
+| single-key GET/SET, `-c 50` | shardkv | redis-server | ratio |
+|---|---|---|---|
+| one generator thread (as specified) | 43,716 ops/s | 65,011 ops/s | **0.67x** |
+| generator given 8 threads | **266,383 ops/s** | 52,571 ops/s | **5.07x** |
+
+`redis-benchmark` is single-threaded unless told otherwise. Fifty connections
+through one client thread saturate that thread at around 45,000 requests a
+second — which is a fact about the benchmark, not about the server. Redis, being
+itself single-threaded, is matched by it; eight loops are not.
+
+Give the generator eight threads and the picture inverts. Redis gets *slower*
+(52,571 from 65,011), because now eight client threads compete with its one
+server thread for eight cores. shardkv gets six times faster.
+
+**Neither row is the "true" number.** The first measures the instrument; the
+second takes cores away from the server on a machine that has only eight. Both
+are reported because reporting only the first would publish the benchmark's
+ceiling as this server's, and reporting only the second would look like picking
+the flattering one.
+
+### Latency, one connection, no pipelining
+
+| p50 | p95 | p99 | p99.9 |
+|---|---|---|---|
+| shardkv **0.143 ms** | 0.183 | 0.231 | 0.327 |
+| redis-server **0.079 ms** | 0.103 | 0.135 | 0.207 |
+
+shardkv is **81% slower per request** here, and the prediction said "within about
+30%". That failure has an explanation, and the explanation is measured rather
+than guessed — see below.
+
+### The cross-shard penalty
+
+Each run is one connection against keys belonging to one shard, classified after
+the fact by whether `cross_shard_requests` moved. 80 runs, of which 12 turned out
+local and 68 remote.
+
+| | median | min | max | samples |
+|---|---|---|---|---|
+| keys on the connection's own loop | **0.079 ms** | 0.079 | 0.079 | 12 |
+| keys on another loop | **0.143 ms** | 0.135 | 0.151 | 68 |
+
+**The penalty is 0.064 ms per request**, and the two groups' ranges do not
+overlap.
+
+`MGET` of four keys on one shard costs 0.143 ms and one message per request;
+`MGET` of four keys spread over four shards costs 0.183 ms and four messages.
+
+**This is what explains the latency result above.** At eight shards, seven
+requests in eight take the remote path. Predicted single-key latency is then
+`0.079 + 7/8 x 0.064 = 0.135 ms`; measured, in a different experiment, **0.143
+ms**. The two measurements corroborate each other, and together they say the
+thing worth knowing: **shardkv's per-request latency is dominated by the
+cross-shard hop, and it buys parallelism with it.**
+
+### Memory
+
+One million `SET`s over a million-key space, which lands about 632,000 distinct
+keys (a million random draws from a million-key space covers about 63% of it) —
+both servers received the same load and ended within 400 keys of each other.
+
+| | baseline | after loading | growth |
+|---|---|---|---|
+| shardkv | 3,712 kB | 97,956 kB | **94,244 kB** |
+| redis-server | 12,800 kB | 86,272 kB | **73,472 kB** |
+
+shardkv uses **1.28x** the memory for the same data. The prediction said 1.5x to
+3x, so this is better than expected — Redis has years of work on encoding small
+values compactly, and a `std::unordered_map` of `std::string` was expected to
+lose by more.
+
+This is whole-process resident memory: the table, the allocator's retention and
+fragmentation, per-thread stacks and buffers, and the process baseline. It is
+**not** an isolated per-key overhead, which is why the baseline is reported
+separately and why even the growth is not a clean per-key number.
+
+### Predictions against outcomes
+
+| # | prediction | outcome |
+|---|---|---|
+| 1 | one connection: within ~30% of Redis | **failed** — 81% slower, explained by the cross-shard hop |
+| 2 | many connections: at least 2x Redis | **failed as specified** (0.67x), **held at 5.07x** once the generator was not the bottleneck |
+| 3 | cross-shard `MGET` slower than same-shard | held — 0.183 vs 0.143 ms, 4 messages vs 1 |
+| 4 | single-key penalty real, ranges disjoint | held — 0.064 ms, no overlap |
+| 5 | memory 1.5x-3x Redis | **failed on the good side** — 1.28x |
+
+`benchmarks/predictions.md` is the original text, committed before the runs.
+
+### What these numbers do and do not support
+
+They support: **shardkv trades per-request latency for parallelism, and the trade
+pays once there is enough concurrent load to use it.** The cross-shard hop costs
+0.064 ms and is taken by seven requests in eight at this shard count; with a load
+generator able to keep eight loops busy, the result is five times Redis's
+throughput on the same machine.
+
+They do **not** support any claim about scaling with cores. That would need the
+curve, and the curve is not measurable here.
+
+Separately, and not from these figures at all, the sharding work established by
+mechanism that **shared-nothing is implemented and free of data races**: keys
+demonstrably spread across shards, the cross-shard path demonstrably taken (the
+`cross_shard_requests` counter is read, not inferred), and ThreadSanitizer silent
+over eighty thousand requests on fifty connections. **That is evidence the design
+is the one described. It is not evidence that it scales well**, and the two are
+easy to blur.
 
 ## Watching it under load
 

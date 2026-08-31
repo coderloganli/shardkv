@@ -1,0 +1,13 @@
+cpu_model: AMD Ryzen 7 7800X3D 8-Core Processor
+cpu_cores: 8
+kernel: Linux 6.6.87.2-microsoft-standard-WSL2
+compiler: /usr/bin/c++
+compiler_version: c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+build_type: Release
+sanitizer: none
+redis_server_version: 7.0.15
+redis_benchmark_version: 7.0.15
+same_machine: yes
+pinned: no
+shardkv_commit: c498686
+date: 2026-08-31T02:33:11Z

@@ -13,6 +13,11 @@ bench_begin
 raw="${BENCH_WORK}/latency.raw"
 out="${BENCH_WORK}/latency.txt"
 
+# One connection, so this is sized for resolving a percentile rather than for
+# saturating the server. See the note in common.sh.
+requests="${BENCH_LATENCY_REQUESTS}"
+(( requests > BENCH_REQUESTS )) && requests="${BENCH_REQUESTS}"
+
 bench_start_shardkv
 bench_start_redis
 
@@ -20,7 +25,7 @@ record() { # label port
   local label="$1" port="$2"
   printf '\n===== %s (one connection, no pipelining) =====\n' "${label}" >> "${raw}"
   local text
-  text="$(bench_run "${port}" -t get,set -n "${BENCH_REQUESTS}" -c 1)"
+  text="$(bench_run "${port}" -t get,set -n "${requests}" -c 1)"
   printf '%s\n' "${text}" >> "${raw}"
 
   local field
@@ -35,7 +40,7 @@ record() { # label port
   bench_number "${label}_p999" "${p999}" >> "${out}"
 }
 
-bench_number requests "${BENCH_REQUESTS}" >> "${out}"
+bench_number requests "${requests}" >> "${out}"
 bench_number clients 1 >> "${out}"
 
 record shardkv "${BENCH_SHARDKV_PORT}"

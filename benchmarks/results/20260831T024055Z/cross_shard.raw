@@ -1,0 +1,174 @@
+shards=8 requests=20000 rounds=10
+round=1 shard=0 delta=20007 p50=0.143 verdict=remote
+round=1 shard=1 delta=20007 p50=0.143 verdict=remote
+round=1 shard=2 delta=20007 p50=0.143 verdict=remote
+round=1 shard=3 delta=20007 p50=0.143 verdict=remote
+round=1 shard=4 delta=20007 p50=0.143 verdict=remote
+round=1 shard=5 delta=20007 p50=0.143 verdict=remote
+round=1 shard=6 delta=20007 p50=0.135 verdict=remote
+round=1 shard=7 delta=20007 p50=0.143 verdict=remote
+round=2 shard=0 delta=20007 p50=0.143 verdict=remote
+round=2 shard=1 delta=20007 p50=0.143 verdict=remote
+round=2 shard=2 delta=7 p50=0.079 verdict=local
+round=2 shard=3 delta=20007 p50=0.143 verdict=remote
+round=2 shard=4 delta=20007 p50=0.143 verdict=remote
+round=2 shard=5 delta=20007 p50=0.143 verdict=remote
+round=2 shard=6 delta=20007 p50=0.143 verdict=remote
+round=2 shard=7 delta=7 p50=0.079 verdict=local
+round=3 shard=0 delta=20007 p50=0.143 verdict=remote
+round=3 shard=1 delta=20007 p50=0.143 verdict=remote
+round=3 shard=2 delta=7 p50=0.079 verdict=local
+round=3 shard=3 delta=20007 p50=0.143 verdict=remote
+round=3 shard=4 delta=20007 p50=0.143 verdict=remote
+round=3 shard=5 delta=7 p50=0.079 verdict=local
+round=3 shard=6 delta=20007 p50=0.135 verdict=remote
+round=3 shard=7 delta=20007 p50=0.135 verdict=remote
+round=4 shard=0 delta=20007 p50=0.143 verdict=remote
+round=4 shard=1 delta=20007 p50=0.143 verdict=remote
+round=4 shard=2 delta=20007 p50=0.143 verdict=remote
+round=4 shard=3 delta=20007 p50=0.135 verdict=remote
+round=4 shard=4 delta=7 p50=0.079 verdict=local
+round=4 shard=5 delta=20007 p50=0.143 verdict=remote
+round=4 shard=6 delta=20007 p50=0.143 verdict=remote
+round=4 shard=7 delta=20007 p50=0.143 verdict=remote
+round=5 shard=0 delta=20007 p50=0.143 verdict=remote
+round=5 shard=1 delta=20007 p50=0.143 verdict=remote
+round=5 shard=2 delta=20007 p50=0.143 verdict=remote
+round=5 shard=3 delta=20007 p50=0.143 verdict=remote
+round=5 shard=4 delta=20007 p50=0.143 verdict=remote
+round=5 shard=5 delta=20007 p50=0.143 verdict=remote
+round=5 shard=6 delta=20007 p50=0.143 verdict=remote
+round=5 shard=7 delta=20007 p50=0.143 verdict=remote
+round=6 shard=0 delta=20007 p50=0.143 verdict=remote
+round=6 shard=1 delta=20007 p50=0.135 verdict=remote
+round=6 shard=2 delta=20007 p50=0.143 verdict=remote
+round=6 shard=3 delta=20007 p50=0.143 verdict=remote
+round=6 shard=4 delta=20007 p50=0.143 verdict=remote
+round=6 shard=5 delta=7 p50=0.079 verdict=local
+round=6 shard=6 delta=20007 p50=0.143 verdict=remote
+round=6 shard=7 delta=20007 p50=0.143 verdict=remote
+round=7 shard=0 delta=20007 p50=0.143 verdict=remote
+round=7 shard=1 delta=20007 p50=0.135 verdict=remote
+round=7 shard=2 delta=20007 p50=0.135 verdict=remote
+round=7 shard=3 delta=20007 p50=0.143 verdict=remote
+round=7 shard=4 delta=7 p50=0.079 verdict=local
+round=7 shard=5 delta=20007 p50=0.143 verdict=remote
+round=7 shard=6 delta=20007 p50=0.143 verdict=remote
+round=7 shard=7 delta=20007 p50=0.143 verdict=remote
+round=8 shard=0 delta=20007 p50=0.143 verdict=remote
+round=8 shard=1 delta=7 p50=0.079 verdict=local
+round=8 shard=2 delta=20007 p50=0.135 verdict=remote
+round=8 shard=3 delta=20007 p50=0.143 verdict=remote
+round=8 shard=4 delta=7 p50=0.079 verdict=local
+round=8 shard=5 delta=20007 p50=0.151 verdict=remote
+round=8 shard=6 delta=20007 p50=0.143 verdict=remote
+round=8 shard=7 delta=20007 p50=0.143 verdict=remote
+round=9 shard=0 delta=20007 p50=0.143 verdict=remote
+round=9 shard=1 delta=20007 p50=0.135 verdict=remote
+round=9 shard=2 delta=20007 p50=0.135 verdict=remote
+round=9 shard=3 delta=20007 p50=0.143 verdict=remote
+round=9 shard=4 delta=20007 p50=0.135 verdict=remote
+round=9 shard=5 delta=20007 p50=0.135 verdict=remote
+round=9 shard=6 delta=20007 p50=0.135 verdict=remote
+round=9 shard=7 delta=20007 p50=0.143 verdict=remote
+round=10 shard=0 delta=20007 p50=0.135 verdict=remote
+round=10 shard=1 delta=20007 p50=0.143 verdict=remote
+round=10 shard=2 delta=7 p50=0.079 verdict=local
+round=10 shard=3 delta=20007 p50=0.135 verdict=remote
+round=10 shard=4 delta=20007 p50=0.143 verdict=remote
+round=10 shard=5 delta=7 p50=0.079 verdict=local
+round=10 shard=6 delta=20007 p50=0.135 verdict=remote
+round=10 shard=7 delta=7 p50=0.079 verdict=local
+
+===== MGET one_shard =====
+WARNING: Could not fetch server CONFIG
+ MGET key:0 key:3 key:28 key:32: rps=0.0 (overall: 3000.0) avg_msec=0.199 (overall: 0.199)                                                                                          MGET key:0 key:3 key:28 key:32: rps=6676.0 (overall: 6661.4) avg_msec=0.142 (overall: 0.142)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6597.6 (overall: 6629.5) avg_msec=0.143 (overall: 0.142)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6576.0 (overall: 6611.7) avg_msec=0.145 (overall: 0.143)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6596.0 (overall: 6607.8) avg_msec=0.144 (overall: 0.143)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6604.0 (overall: 6607.0) avg_msec=0.144 (overall: 0.143)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6632.0 (overall: 6611.2) avg_msec=0.143 (overall: 0.143)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6382.5 (overall: 6578.4) avg_msec=0.148 (overall: 0.144)                                                                                             MGET key:0 key:3 key:28 key:32: rps=5996.0 (overall: 6505.7) avg_msec=0.158 (overall: 0.146)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6320.0 (overall: 6485.1) avg_msec=0.150 (overall: 0.146)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6140.0 (overall: 6450.7) avg_msec=0.154 (overall: 0.147)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6601.6 (overall: 6464.4) avg_msec=0.143 (overall: 0.147)                                                                                             MGET key:0 key:3 key:28 key:32: rps=6504.0 (overall: 6467.7) avg_msec=0.146 (overall: 0.147)                                                                                             ====== MGET key:0 key:3 key:28 key:32 ======
+  20000 requests completed in 3.09 seconds
+  1 parallel clients
+  60 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.095 milliseconds (cumulative count 1)
+50.000% <= 0.143 milliseconds (cumulative count 13552)
+75.000% <= 0.151 milliseconds (cumulative count 15802)
+87.500% <= 0.167 milliseconds (cumulative count 18111)
+93.750% <= 0.183 milliseconds (cumulative count 19095)
+96.875% <= 0.199 milliseconds (cumulative count 19501)
+98.438% <= 0.215 milliseconds (cumulative count 19692)
+99.219% <= 0.247 milliseconds (cumulative count 19849)
+99.609% <= 0.271 milliseconds (cumulative count 19930)
+99.805% <= 0.295 milliseconds (cumulative count 19964)
+99.902% <= 0.343 milliseconds (cumulative count 19983)
+99.951% <= 0.407 milliseconds (cumulative count 19991)
+99.976% <= 0.543 milliseconds (cumulative count 19996)
+99.988% <= 1.015 milliseconds (cumulative count 19998)
+99.994% <= 1.951 milliseconds (cumulative count 19999)
+99.997% <= 6.695 milliseconds (cumulative count 20000)
+100.000% <= 6.695 milliseconds (cumulative count 20000)
+
+Cumulative distribution of latencies:
+0.025% <= 0.103 milliseconds (cumulative count 5)
+98.060% <= 0.207 milliseconds (cumulative count 19612)
+99.855% <= 0.303 milliseconds (cumulative count 19971)
+99.955% <= 0.407 milliseconds (cumulative count 19991)
+99.975% <= 0.503 milliseconds (cumulative count 19995)
+99.985% <= 0.607 milliseconds (cumulative count 19997)
+99.990% <= 1.103 milliseconds (cumulative count 19998)
+99.995% <= 2.007 milliseconds (cumulative count 19999)
+100.000% <= 7.103 milliseconds (cumulative count 20000)
+
+Summary:
+  throughput summary: 6468.31 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.146     0.088     0.143     0.183     0.239     6.695
+mget_one_shard_delta=20007
+
+===== MGET four_shards =====
+WARNING: Could not fetch server CONFIG
+ MGET key:0 key:2 key:1 key:7: rps=0.0 (overall: 4000.0) avg_msec=0.174 (overall: 0.174)                                                                                        MGET key:0 key:2 key:1 key:7: rps=5140.0 (overall: 5135.5) avg_msec=0.186 (overall: 0.186)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5107.6 (overall: 5121.5) avg_msec=0.187 (overall: 0.186)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5104.0 (overall: 5115.7) avg_msec=0.187 (overall: 0.187)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5264.0 (overall: 5152.7) avg_msec=0.181 (overall: 0.185)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5204.0 (overall: 5162.9) avg_msec=0.184 (overall: 0.185)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5131.5 (overall: 5157.7) avg_msec=0.186 (overall: 0.185)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5088.0 (overall: 5147.7) avg_msec=0.188 (overall: 0.185)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5256.0 (overall: 5161.3) avg_msec=0.181 (overall: 0.185)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5248.0 (overall: 5170.9) avg_msec=0.182 (overall: 0.185)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5280.0 (overall: 5181.8) avg_msec=0.181 (overall: 0.184)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5259.0 (overall: 5188.8) avg_msec=0.181 (overall: 0.184)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5140.0 (overall: 5184.8) avg_msec=0.186 (overall: 0.184)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5196.0 (overall: 5185.6) avg_msec=0.184 (overall: 0.184)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5168.0 (overall: 5184.4) avg_msec=0.185 (overall: 0.184)                                                                                           MGET key:0 key:2 key:1 key:7: rps=5207.2 (overall: 5185.9) avg_msec=0.183 (overall: 0.184)                                                                                           ====== MGET key:0 key:2 key:1 key:7 ======
+  20000 requests completed in 3.86 seconds
+  1 parallel clients
+  58 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.143 milliseconds (cumulative count 34)
+50.000% <= 0.183 milliseconds (cumulative count 12944)
+75.000% <= 0.191 milliseconds (cumulative count 16362)
+87.500% <= 0.199 milliseconds (cumulative count 17790)
+93.750% <= 0.215 milliseconds (cumulative count 18952)
+96.875% <= 0.231 milliseconds (cumulative count 19405)
+98.438% <= 0.255 milliseconds (cumulative count 19694)
+99.219% <= 0.287 milliseconds (cumulative count 19849)
+99.609% <= 0.327 milliseconds (cumulative count 19940)
+99.805% <= 0.359 milliseconds (cumulative count 19961)
+99.902% <= 0.399 milliseconds (cumulative count 19981)
+99.951% <= 0.495 milliseconds (cumulative count 19991)
+99.976% <= 0.727 milliseconds (cumulative count 19996)
+99.988% <= 0.775 milliseconds (cumulative count 19998)
+99.994% <= 0.895 milliseconds (cumulative count 19999)
+99.997% <= 2.247 milliseconds (cumulative count 20000)
+100.000% <= 2.247 milliseconds (cumulative count 20000)
+
+Cumulative distribution of latencies:
+0.000% <= 0.103 milliseconds (cumulative count 0)
+92.660% <= 0.207 milliseconds (cumulative count 18532)
+99.445% <= 0.303 milliseconds (cumulative count 19889)
+99.925% <= 0.407 milliseconds (cumulative count 19985)
+99.955% <= 0.503 milliseconds (cumulative count 19991)
+99.960% <= 0.607 milliseconds (cumulative count 19992)
+99.975% <= 0.703 milliseconds (cumulative count 19995)
+99.990% <= 0.807 milliseconds (cumulative count 19998)
+99.995% <= 0.903 milliseconds (cumulative count 19999)
+100.000% <= 3.103 milliseconds (cumulative count 20000)
+
+Summary:
+  throughput summary: 5186.72 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.184     0.136     0.183     0.223     0.279     2.247
+mget_four_shards_delta=80007
