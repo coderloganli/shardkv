@@ -45,7 +45,10 @@ record() {
   local op rps p50 p99 p999
   for op in SET GET; do
     local key="${label}_${suffix}_$(printf '%s' "${op}" | tr 'A-Z' 'a-z')"
-    rps="$(printf '%s\n' "${text}" | parse_throughput "${op}")"  || bench_die "${label} ${op}: no throughput in the output"
+    if ! rps="$(printf '%s\n' "${text}" | parse_throughput "${op}")"; then
+      bench_explain "${label} ${op}" "${text}"
+      bench_die "${label} ${op}: no throughput in the output"
+    fi
     p50="$(printf '%s\n' "${text}" | parse_percentile p50 "${op}")" || bench_die "${label} ${op}: no latency summary"
     p99="$(printf '%s\n' "${text}" | parse_percentile p99 "${op}")" || bench_die "${label} ${op}: no latency summary"
     p999="$(printf '%s\n' "${text}" | parse_p999 "${op}")"       || bench_die "${label} ${op}: no percentile block"

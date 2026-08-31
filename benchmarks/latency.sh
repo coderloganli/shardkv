@@ -34,8 +34,10 @@ record() { # label port
   for op in SET GET; do
     local key="${label}_$(printf '%s' "${op}" | tr 'A-Z' 'a-z')"
     for field in p50 p95 p99; do
-      value="$(printf '%s\n' "${text}" | parse_percentile "${field}" "${op}")" \
-        || bench_die "${label} ${op}: no latency summary"
+      if ! value="$(printf '%s\n' "${text}" | parse_percentile "${field}" "${op}")"; then
+        bench_explain "${label} ${op}" "${text}"
+        bench_die "${label} ${op}: no latency summary"
+      fi
       bench_number "${key}_${field}" "${value}" >> "${out}"
     done
     p999="$(printf '%s\n' "${text}" | parse_p999 "${op}")" \

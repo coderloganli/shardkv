@@ -229,7 +229,27 @@ bench_run() { # port args...
     cat "${BENCH_FIXTURE_OUTPUT}"
     return 0
   fi
-  redis-benchmark -p "${port}" "$@" 2>&1
+  # The exit status matters and used to be discarded: a run that could not
+  # connect returns non-zero and prints one line, and without this the caller
+  # went on to parse that line for a throughput figure and reported its absence
+  # instead of its cause.
+  local text status
+  text="$(redis-benchmark -p "${port}" "$@" 2>&1)"
+  status=$?
+  printf '%s\n' "${text}"
+  return "${status}"
+}
+
+# What redis-benchmark actually said, when a parser could not find a figure in
+# it.
+#
+# "no throughput summary line in this output" is true and useless: the reason it
+# is not there is in the output, and the output is what nobody printed. A run
+# that could not connect says so in its first line, and that line is worth more
+# than every layer of shell above it guessing.
+bench_explain() { # label text
+  printf '%s: the generator produced no usable summary. It said:\n' "$1" >&2
+  printf '%s\n' "$2" | tr '\r' '\n' | grep -v '^ *$' | tail -8 | sed 's/^/  | /' >&2
 }
 
 # Every figure in a results file is a number, so that a reader -- and the smoke
