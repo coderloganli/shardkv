@@ -29,10 +29,18 @@ have.
 
 **The environment is part of what is being verified.** This project's claims are
 about behaviour under sanitizers and about performance, and both are properties
-of a toolchain and a kernel as much as of the source. An image that CI can build
-from the same file makes "it passes here" and "it passes in CI" the same
-statement. With a hand-configured environment they are two statements that
-happen to agree until they do not.
+of a toolchain and a kernel as much as of the source. Pinning them in an image
+means a local run is a statement about a known environment rather than about
+whatever the developer's machine happens to carry.
+
+It does not yet make "it passes here" and "it passes in CI" the same statement,
+and this record used to claim that it did. `.github/workflows/ci.yml` never
+builds this Dockerfile: it runs on `ubuntu-latest` and installs `g++-13`,
+`cmake`, `ninja-build` and `redis-tools` with `apt-get` directly. The two lists
+name the same packages on the same distribution, so today they agree — but they
+are two lists, maintained separately, and nothing fails when they drift. Making
+CI build and run this image would close that gap; until it does, "same
+environment" is a property this file describes and CI approximates.
 
 **`redis-tools` is the part that settles it.** The protocol conformance work
 needs a real `redis-cli` and a real `redis-benchmark` — that is the entire point
