@@ -1,0 +1,22 @@
+WARNING: Could not fetch server CONFIG
+ 
+GET: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)
+                                                           
+GET: rps=50529.9 (overall: 50529.9) avg_msec=0.137 (overall: 0.137)
+                                                                    
+====== GET ======
+  20000 requests completed in 0.40 seconds
+  10 parallel clients
+  3 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+Latency by percentile distribution:
+
+
+Summary:
+  throughput summary: 49504.95 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.140     0.016     0.135     0.231     0.391     1.575
+

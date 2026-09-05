@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ca-certificates \
       redis-tools \
+      redis-server \
     && rm -rf /var/lib/apt/lists/*
 
 # g++-13 for complete C++20 support. Pinned as the default so that CMake, the
@@ -27,6 +28,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
     && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100
 
+# redis-server is here for the control group. Every performance figure in
+# benchmarks/ is a comparison against Redis on the same machine under the same
+# load, which is what makes a difference meaningful on a virtualised host where
+# the absolute numbers are not -- see
+# docs/adr/0014-what-this-machine-can-and-cannot-measure.md. It comes from the
+# same Ubuntu package set as redis-tools, so the control group and the load
+# generator are the same version, and benchmarks/environment.sh refuses to
+# record a run where they are not. It does not start on its own: the image
+# installs it, and the benchmark scripts run it on a port of their choosing.
+#
 # redis-tools above is the reason this is a container rather than a bare
 # toolchain: the protocol conformance work needs a real redis-cli and a real
 # redis-benchmark, at a version that is pinned rather than whatever the host

@@ -37,6 +37,20 @@ add_executable(shardkv src/main.cc)
 target_link_libraries(shardkv PRIVATE shardkv_lib)
 shardkv_apply_sanitizers(shardkv)
 
+# ------------------------------------------------------- the benchmark helper
+
+# Prints keys belonging to a chosen shard. The benchmark scripts need it because
+# redis-benchmark generates `key:__rand_int__` and cannot be told to aim at a
+# shard -- and it reuses the server's own shardForKey rather than reimplementing
+# the mapping, because a benchmark that disagreed with the server about which
+# shard owns a key would produce a confident wrong number.
+#
+# Sanitized like every other target: a binary that ships in the repository and is
+# not instrumented under the sanitizer builds is a hole in the matrix.
+add_executable(shard_keys benchmarks/shard_keys.cc)
+target_link_libraries(shard_keys PRIVATE shardkv_lib)
+shardkv_apply_sanitizers(shard_keys)
+
 # ------------------------------------------------------------------ the tests
 
 include(FetchContent)
@@ -71,7 +85,7 @@ endif()
 
 # One binary per area, so a failure names the area before it names the case.
 foreach(area parser encoder store expiry dispatch unique_fd integration
-                mpsc slots routing sharding buffer)
+                mpsc slots routing sharding buffer bench)
   add_executable(${area}_test tests/${area}_test.cc)
   target_link_libraries(${area}_test PRIVATE shardkv_lib GTest::gtest_main)
   target_include_directories(${area}_test PRIVATE tests)
@@ -85,3 +99,19 @@ foreach(area parser encoder store expiry dispatch unique_fd integration
   endif()
   gtest_discover_tests(${area}_test)
 endforeach()
+
+# The two suites that drive the benchmark helper need to know where it was built.
+# A hard-coded relative path would work from one build directory and not another.
+foreach(area bench sharding)
+  target_compile_definitions(${area}_test
+    PRIVATE SHARD_KEYS_PATH="$<TARGET_FILE:shard_keys>")
+  add_dependencies(${area}_test shard_keys)
+endforeach()
+
+# The benchmark scripts are a deliverable, so "they still run" is a test result
+# rather than a memory. Smoke-sized: a few hundred requests, one round.
+add_test(NAME bench_smoke
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/self_test.sh)
+set_tests_properties(bench_smoke PROPERTIES
+  ENVIRONMENT "BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+  TIMEOUT 300)

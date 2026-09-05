@@ -362,6 +362,17 @@ was generated locally and whether threads were pinned; measurements live in
 `benchmarks/` beside the script and raw output, with the expected result written
 down before the run. `docs/product.md` states the principle.
 
+**What this machine cannot measure is recorded rather than skipped.** The
+available machine is virtualised and its PMU is unreachable, so there is no
+scaling curve and no profile, and no claim about scaling with cores is made
+anywhere. What replaces them is a same-machine Redis control group, where the
+difference is claimed rather than the absolutes, and the mechanism evidence from
+the sharding work -- keys demonstrably spread, the cross-shard path demonstrably
+taken, TSan silent under load. That evidence says shared-nothing is implemented
+and race-free; it says nothing about how well it scales, and the two are not
+allowed to blur. See
+`docs/adr/0014-what-this-machine-can-and-cannot-measure.md`.
+
 ## Toolchain
 
 | Layer      | Choice              | Why                                              |

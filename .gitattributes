@@ -1,0 +1,4 @@
+# Shell scripts must have LF endings wherever they are checked out: they are run
+# from the working tree, including through a Linux container mounted on a Windows
+# host, where CRLF makes bash fail on the shebang line and every line after it.
+*.sh text eol=lf
