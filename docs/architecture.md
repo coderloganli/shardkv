@@ -172,28 +172,22 @@ Every command outside the implemented set is answered with
 `-ERR unknown command 'X'`. The connection stays open and no bytes are left
 unread.
 
-This is not merely tidy: it is the protocol's documented downgrade path. The RESP
-specification has clients open a session with `HELLO <version>`, and states that
-a client detects a server that only speaks RESP2 by receiving
-`-ERR unknown command 'HELLO'` and carrying on in RESP2. `HELLO` is therefore not
-a command this server needs to implement, but it is one it must *refuse
-correctly* — a server that hangs, closes, or silently ignores it fails the
-handshake instead of declining it.
+This is not merely tidy: it is the protocol's documented downgrade path. RESP has
+clients open with `HELLO <version>` and detect a RESP2-only server by receiving
+`-ERR unknown command 'HELLO'`. `HELLO` is therefore not a command this server
+implements, but it is one it must *refuse correctly* — hanging, closing or
+silently ignoring it fails the handshake instead of declining it.
 
 `COMMAND` is implemented rather than refused, returning an empty array. It is
 cheap, and clients may ask for command metadata.
 
-**The command name is escaped before it is quoted back.** An error reply is a
-simple error, which is line-delimited, and the name in it came from the client
-— a bulk string, so it may contain any byte at all. Echoing it raw is
-response-line injection: `*1\r\n$14\r\nBAD\r\n+INJECTED\r\n` is a legal
-request whose name would end the error line early and let the sender dictate
-the bytes the client reads as its next reply. Every byte outside printable
-ASCII becomes `\xHH`, and the echo is capped at 128 bytes.
-
-The general rule this is an instance of: **client bytes may be returned inside
-a bulk string, which is length-framed, but never inside a simple string or a
-simple error, which are terminated by the first CRLF.**
+**The command name is escaped before it is quoted back**, because an error reply
+is line-delimited and the name came from the client, so echoing it raw is
+response-line injection. The general rule it is an instance of: client bytes may
+be returned inside a bulk string, which is length-framed, but never inside a
+simple string or a simple error, which end at the first CRLF. The attack, the
+cap, and why the escaping happens at the reply rather than in the parser are in
+`docs/adr/0016-client-bytes-are-escaped-before-they-are-echoed.md`.
 
 ### The parser is a pure function
 
@@ -308,70 +302,65 @@ to be thread-safe, and none of them are.
 
 ## Conventions that are not obvious from the code
 
+Each of these is a decision with a record behind it; the record holds the
+reasoning, this list holds the fact and where it bites.
+
 **Level-triggered epoll, not edge-triggered.** Getting level-triggered wrong
 costs a redundant wakeup; getting edge-triggered wrong costs a silently wedged
-connection. The reasoning, and the conditions under which ET would be
-reconsidered, are in `docs/adr/0009-level-triggered-epoll-not-edge-triggered.md`.
+connection. See `docs/adr/0009-level-triggered-epoll-not-edge-triggered.md`,
+which also states the conditions under which ET would be reconsidered.
 
-**`EPOLLOUT` is registered on demand.** It is not held permanently: under LT a
-permanently-registered writable socket spins the event loop. It is registered
-only when a `write()` comes up short and deregistered as soon as the buffer
-drains.
+**`EPOLLOUT` is registered on demand**, never held permanently: under LT a
+permanently-registered writable socket spins the loop. It goes on when a
+`write()` comes up short and off as soon as the buffer drains.
 
 **Each loop owns a timerfd with two duties.** It ticks every 100 ms in the
-loop's own epoll set -- so `epoll_wait` keeps its infinite timeout and the tick is
-just another descriptor to dispatch on -- and it both runs the expiry sampling
-pass and re-arms a throttled listener.
+loop's own epoll set, so `epoll_wait` keeps its infinite timeout and the tick is
+just another descriptor to dispatch on. The tick runs the expiry sampling pass
+and re-arms a throttled listener.
 
 **A listener out of descriptors is throttled, not retried.** `EAGAIN` from
-`accept()` means the backlog is empty and the loop can sleep; `EMFILE` means it is
-*not* empty and there was no descriptor to accept into, so retrying under
-level-triggered epoll is an unbreakable spin. The loop drops `EPOLLIN` from the
-listener and the next tick puts it back, so the waiting client sits in the
-backlog until this loop has a descriptor again rather than being refused -- at
-least a tick, and possibly longer, because dropping the interest does not take
-the listener out of its `SO_REUSEPORT` group and the kernel goes on assigning to
-it. `loopN_accept_failures` says it happened. See
+`accept()` means the backlog is empty; `EMFILE` means it is *not* empty and there
+was no descriptor to accept into, so retrying under LT is an unbreakable spin.
+The loop drops `EPOLLIN` from the listener and the next tick puts it back, so the
+client waits in the backlog rather than being refused — at least a tick, possibly
+longer, because dropping the interest does not leave the `SO_REUSEPORT` group and
+the kernel goes on assigning to it. `loopN_accept_failures` says it happened. See
 `docs/adr/0013-a-listener-out-of-descriptors-is-throttled-not-retried.md`.
 
 **The build environment is the container, not the developer's machine.** The
 repository carries a `Dockerfile` with the toolchain, CMake and `redis-tools`;
-the suite, the sanitizer builds and the manual protocol checks all run inside it,
-so that a result here and a result in CI are the same statement rather than two
-that happen to agree. The reasoning is in `docs/adr/`.
+the suite, the sanitizer builds and the manual protocol checks all run inside it.
+CI does not build that image — it installs the same packages on `ubuntu-latest`
+itself, so the two agree today but are maintained separately. Both halves of that
+are recorded in `docs/adr/0003-build-and-test-in-a-container.md`, along with the
+two accommodations the TSan build needs on modern kernels, which look like broken
+tooling the first time they are met.
 
 **Sanitizers are part of the build matrix, not an occasional check.** CI builds
-three ways on `ubuntu-latest`: Release for benchmarking and regressions, Debug
-with ASan and UBSan for memory and undefined behaviour, and Debug with TSan for
-data races.
-
-The TSan build is wired up while the server is still single-threaded, where it
-has nothing to find. That is deliberate: the threading work then lands into a
-pipeline that already reports races, rather than being written for days and
-audited afterwards.
-
-**The TSan build needs two accommodations on modern kernels**, both already made in CMake and CI. They look like broken tooling the first time they are met, so the symptom and the reasons are in `docs/adr/0003-build-and-test-in-a-container.md`.
+three ways: Release for benchmarking and regressions, Debug with ASan and UBSan,
+and Debug with TSan. The TSan build was wired up while the server was still
+single-threaded, where it had nothing to find, so that the threading work landed
+into a pipeline that already reported races rather than being audited afterwards.
 
 TSan is the one that matters. The correctness of this architecture reduces to a
-single claim -- no two threads touch the same data -- and TSan checks that claim
-mechanically rather than by inspection. It must cover the cases where the claim
-is most likely to break: many clients reading and writing keys that span shards,
-connections opening and closing while requests are in flight, and shutdown with
-messages still in transit. **A race here means a piece of state escaped its
-thread; the answer is to find which one, never to add a mutex.**
+single claim — no two threads touch the same data — and TSan checks it
+mechanically rather than by inspection. It must cover where that claim is most
+likely to break: many clients spanning shards, connections opening and closing
+mid-request, and shutdown with messages still in transit. **A race here means a
+piece of state escaped its thread; the answer is to find which one, never to add
+a mutex.**
 
-**Tests are expected to be able to fail.** Beyond unit tests, the suite includes
+**Tests are expected to be able to fail.** Beyond unit tests the suite includes
 protocol conformance against real client behaviour, and fault injection: a slow
-client that never reads, a client killed mid-write, `accept()` under an
-exhausted `ulimit -n`, and a soak run watched for RSS and fd growth. Error paths
-are covered, not only the happy path.
+client that never reads, a client killed mid-write, `accept()` under an exhausted
+`ulimit -n`, and a soak run watched for RSS and fd growth.
 
 **Performance numbers are inseparable from their environment.** Every recorded
 figure carries the machine, kernel, compiler, optimisation level, whether load
 was generated locally and whether threads were pinned; measurements live in
 `benchmarks/` beside the script and raw output, with the expected result written
-down before the run. `docs/product.md` states the principle; this is where it
-lands in practice.
+down before the run. `docs/product.md` states the principle.
 
 ## Toolchain
 
