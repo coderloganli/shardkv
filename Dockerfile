@@ -6,7 +6,7 @@
 #
 #   docker build -t shardkv-dev .
 #   docker run --rm -v "$PWD":/src -w /src shardkv-dev \
-#       bash -c 'cmake -B build && cmake --build build -j && ctest --test-dir build --output-on-failure'
+#       bash -c 'cmake -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure'
 
 FROM ubuntu:24.04
 
