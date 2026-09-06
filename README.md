@@ -117,6 +117,40 @@ Sanitizer builds are selected with `-DSHARDKV_SANITIZER=address` or `=thread`.
 The thread build additionally needs `--security-opt seccomp=unconfined` under
 Docker; `docs/architecture.md` says why.
 
+## The test suite
+
+`ctest` runs **225 entries**. 224 are GoogleTest cases; the 225th, `bench_smoke`,
+is a shell harness of 86 assertions that tests the benchmark scripts themselves —
+the parser that reads `redis-benchmark`'s output, the rule that classifies a run
+as local or cross-shard, and each script's refusal to produce a figure it cannot
+stand behind.
+
+The GoogleTest cases sit roughly where the risk is: 32 on the store, 28 on the
+RESP parser, 26 on expiry, 16 integration, 13 on dispatch, 12 each on sharding
+and on `MGET`/`MSET` scatter/gather, 9 each on the reply slots, the MPSC queue
+and the encoder, 7 on backpressure, and the rest on routing, buffers, ordering,
+fault injection, connection lifetime and the cross-shard counter.
+
+CI builds three ways and runs the whole suite in each: Release, ASan+UBSan, and
+TSan. All three are green on x86_64 — the badge above is the live answer.
+
+**One result depends on the machine, and it is worth saying why.** On an
+`aarch64` host — Docker Desktop's Linux VM on Apple Silicon — 224 of the 225
+pass and `bench_smoke` loses 5 of its 86 assertions. Every one of the five traces
+back to a single fact: that VM does not expose a CPU identity. `/proc/cpuinfo`
+carries no `model name` field at all, and `lscpu` answers `Vendor ID: Apple`,
+`Model name: -`, `CPU part 0x000`. So `benchmarks/environment.sh` cannot complete
+an environment record, refuses to emit a partial one, and the four measurement
+scripts refuse in turn to measure anything without it.
+
+That is the recorder working, not failing. A figure whose machine cannot be named
+is not a figure this project will publish, and the same principle is what
+`docs/adr/0014-what-this-machine-can-and-cannot-measure.md` applies to the
+scaling curve. The consequence is worth stating plainly: **no measurement in
+this README can be reproduced on such a machine** — the scripts will decline
+before they run. The numbers below came from an x86_64 host, which is named
+beside them.
+
 ## What it measures out at
 
 Every figure here comes from `benchmarks/`, with its environment recorded beside
@@ -295,7 +329,9 @@ is the full hour.
 ## Known limitations
 
 Beyond the deliberate omissions above, these are gaps of the current state
-rather than of the design, and each closes in a later step:
+rather than of the design. Nothing here is scheduled: the four steps this
+project set out to do are done, so each of these is a known cost being paid
+knowingly, not work already queued up:
 
 - **A connection keeps a buffer as large as its largest burst.** The consumed
   prefix is compacted away, so a buffer no longer grows with the number of
@@ -336,4 +372,5 @@ rather than of the design, and each closes in a later step:
 
 ## Licence
 
-Not yet chosen.
+MIT — see `LICENSE`. The one vendored dependency, `third_party/xxhash`, is Yann
+Collet's xxHash under the BSD 2-Clause licence, whose text is kept beside it.
