@@ -1,0 +1,13 @@
+cpu_model: Apple M5 Pro (asserted)
+cpu_cores: 18
+kernel: Linux 7.0.5-orbstack-00330-ge3df4e19b0a0-dirty
+compiler: /usr/bin/c++
+compiler_version: c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+build_type: RelWithDebInfo
+sanitizer: none
+redis_server_version: 7.0.15
+redis_benchmark_version: 7.0.15
+same_machine: yes
+pinned: no
+shardkv_commit: unavailable
+date: 2026-09-07T13:58:40Z

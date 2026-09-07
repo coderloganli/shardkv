@@ -34,6 +34,19 @@ trap 'rm -rf "${SCRATCH}"' EXIT
 # open a file to trust.
 export BENCH_RESULTS="${SCRATCH}/results"
 
+# This run asserts its own CPU model, and says so in the value.
+#
+# Not a workaround: it is the mechanism working as
+# docs/adr/0018-an-environment-field-may-be-asserted-never-guessed.md describes.
+# A smoke run publishes no figures -- it exercises the scripts -- so what it
+# records about the machine is beside the point, while on a host that cannot
+# name its own CPU (an aarch64 Linux guest on macOS) the scripts
+# would otherwise refuse to start and this suite could never be green there.
+#
+# The cases below that test DETECTION pass BENCH_CPU_MODEL= to switch this off,
+# an empty assertion being no assertion at all.
+export BENCH_CPU_MODEL="${BENCH_CPU_MODEL:-smoke test, not a measured machine}"
+
 passed=0
 failed=0
 
@@ -64,6 +77,12 @@ BENCH_MIN_REQUESTS_SEEN="$(
     # shellcheck source=/dev/null
     source "${HERE}/common.sh" > /dev/null 2>&1
     printf '%s' "${BENCH_MIN_REQUESTS}" )
+)"
+BENCH_MIN_SAMPLES_SEEN="$(
+  ( set -uo pipefail
+    # shellcheck source=/dev/null
+    source "${HERE}/common.sh" > /dev/null 2>&1
+    printf '%s' "${BENCH_MIN_SAMPLES}" )
 )"
 
 bench_number_probe() { # name value
@@ -360,6 +379,260 @@ if grep -q -- '--pin' "${HERE}/common.sh"; then
 else
   bad "29b  pinned" "environment.sh records it but common.sh never passes --pin"
 fi
+
+# ---------------------------------------------------------------------------
+# The profiling step's cases. Numbered A1-A9 and B10-B24 to keep them apart from
+# the cases above, which are numbered by an earlier task's document.
+# ---------------------------------------------------------------------------
+
+echo "== naming the CPU, or refusing to (cases A1-A9) =="
+
+# The detection chain is /proc/cpuinfo, then lscpu, then an assertion from the
+# operator. Provoked by configuration, never by editing a copy of the script:
+# BENCH_CPU_PROC and BENCH_CPU_LSCPU point the two detectors at files, so a
+# machine that HAS a model name can still exercise the path of one that does not.
+no_model="${SCRATCH}/cpuinfo-without-model"
+printf 'processor\t: 0\nBogoMIPS\t: 48.00\nCPU implementer\t: 0x61\n' > "${no_model}"
+with_model="${SCRATCH}/cpuinfo-with-model"
+printf 'processor\t: 0\nmodel name\t: A Very Real CPU\n' > "${with_model}"
+lscpu_real="${SCRATCH}/lscpu-real"
+printf 'Architecture:  aarch64\nModel name:    Some Named Part\n' > "${lscpu_real}"
+lscpu_dash="${SCRATCH}/lscpu-dash"
+printf 'Architecture:  aarch64\nVendor ID:     Apple\nModel name:    -\n' > "${lscpu_dash}"
+
+cpu_field() { sed -n 's/^cpu_model: *//p'; }
+
+# A1 -- the ordinary x86 path is unchanged.
+out="$(BENCH_CPU_MODEL= BENCH_CPU_PROC="${with_model}" "${HERE}/environment.sh" 2>"${SCRATCH}/a1.err")"; st=$?
+check_zero_exit "A1a  a detected model is recorded" "${st}"
+check_eq "A1b  and it is the detected value" "A Very Real CPU" "$(printf '%s\n' "${out}" | cpu_field)"
+if grep -qi 'assert' "${SCRATCH}/a1.err"; then
+  bad "A1c  a detected model is not marked asserted" "warned anyway"
+else ok "A1c  a detected model is not marked asserted"; fi
+
+# A2 -- no model line in /proc/cpuinfo, but lscpu knows.
+out="$(BENCH_CPU_MODEL= BENCH_CPU_PROC="${no_model}" BENCH_CPU_LSCPU="${lscpu_real}" \
+       "${HERE}/environment.sh" 2>/dev/null)"; st=$?
+check_zero_exit "A2a  lscpu answers when cpuinfo does not" "${st}"
+check_eq "A2b  and its value is recorded" "Some Named Part" "$(printf '%s\n' "${out}" | cpu_field)"
+
+# A3 -- lscpu's placeholder is not an answer. This is the case on the machine
+# this was written on: the hypervisor tells the guest nothing.
+out="$(BENCH_CPU_MODEL= BENCH_CPU_PROC="${no_model}" BENCH_CPU_LSCPU="${lscpu_dash}" \
+       "${HERE}/environment.sh" 2>&1)"; st=$?
+check_nonzero_exit "A3   a dash from lscpu is not a model name" "${st}"
+
+# A4 -- and then the operator may say what it is.
+out="$(BENCH_CPU_PROC="${no_model}" BENCH_CPU_LSCPU="${lscpu_dash}" \
+       BENCH_CPU_MODEL="Apple M5 Pro" "${HERE}/environment.sh" 2>"${SCRATCH}/a4.err")"; st=$?
+check_zero_exit "A4a  an asserted model is accepted" "${st}"
+check_eq "A4b  and it is marked as asserted" "Apple M5 Pro (asserted)" \
+         "$(printf '%s\n' "${out}" | cpu_field)"
+if [[ -s "${SCRATCH}/a4.err" ]]; then ok "A4c  and it warns on standard error"
+else bad "A4c  asserted model" "no warning was printed"; fi
+
+# A5 -- with nothing to detect and nothing asserted, it still refuses, and it
+# says what the person who hit it can do about it.
+out="$(BENCH_CPU_MODEL= BENCH_CPU_PROC="${no_model}" BENCH_CPU_LSCPU="${lscpu_dash}" \
+       "${HERE}/environment.sh" 2>&1)"; st=$?
+check_nonzero_exit "A5a  an unnameable CPU is a refusal" "${st}"
+check_contains "A5b  and it names the field" "${out}" "cpu_model"
+check_contains "A5c  and it offers the way out" "${out}" "BENCH_CPU_MODEL"
+
+# A6 -- an empty assertion is not an assertion.
+out="$(BENCH_CPU_PROC="${no_model}" BENCH_CPU_LSCPU="${lscpu_dash}" \
+       BENCH_CPU_MODEL="" "${HERE}/environment.sh" 2>&1)"; st=$?
+check_nonzero_exit "A6   an empty assertion is refused like none at all" "${st}"
+
+# A7 -- assertion wins over detection, as it already does for the commit hash.
+out="$(BENCH_CPU_PROC="${with_model}" BENCH_CPU_MODEL="What The Operator Says" \
+       "${HERE}/environment.sh" 2>"${SCRATCH}/a7.err")"; st=$?
+check_zero_exit "A7a  an assertion is taken over a detection" "${st}"
+check_eq "A7b  and the operator's value is what lands" "What The Operator Says (asserted)" \
+         "$(printf '%s\n' "${out}" | cpu_field)"
+
+# A8 -- the block is `name: value` lines, so a value carrying a newline can
+# forge a field. Refused, and refused before anything is printed: a recorder
+# that emits half a block and then fails has still put half a block somewhere.
+out="$(BENCH_CPU_PROC="${no_model}" BENCH_CPU_LSCPU="${lscpu_dash}" \
+       BENCH_CPU_MODEL="Real CPU
+cpu_cores: 999" "${HERE}/environment.sh" 2>/dev/null)"; st=$?
+check_nonzero_exit "A8a  an assertion that could forge a field is refused" "${st}"
+check_eq "A8b  and nothing at all was printed" "" "${out}"
+
+# A9 -- the caller's contract, which is the one that actually protects a reader:
+# an unnameable CPU means no results directory, not a partial one.
+before="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+BENCH_CPU_MODEL= BENCH_CPU_PROC="${no_model}" BENCH_CPU_LSCPU="${lscpu_dash}" \
+  BENCH_REQUESTS=400 BENCH_CLIENTS=1 "${HERE}/latency.sh" > /dev/null 2>&1; st=$?
+after="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+check_nonzero_exit "A9a  a measurement refuses when the CPU cannot be named" "${st}"
+check_eq "A9b  and publishes nothing" "${before}" "${after}"
+
+echo "== reading a profile (cases B18-B23) =="
+
+# The fixtures are a REAL recording, captured from this server under load, not
+# written by hand. A parser that has only ever seen invented input can pass every
+# case here and find nothing in the real thing -- which is exactly what happened
+# once already, when redis-benchmark turned out to draw its section headings at
+# the END of a line.
+
+# B18 -- the ranked symbols, and the event they were sampled on. The event name
+# matters as much as the numbers: `:u` is what says this profile saw user space
+# only, and every claim made from it depends on that being true.
+check_eq "B18a  the event is named" "cpu-clock:u" \
+         "$(parse_profile_event < "${FIXTURES}/perf-report.txt")"
+check_eq "B18b  the hottest symbol" "recv" \
+         "$(parse_profile_top 1 < "${FIXTURES}/perf-report.txt" | awk '{print $2}')"
+check_eq "B18c  and its share" "20.58" \
+         "$(parse_profile_top 1 < "${FIXTURES}/perf-report.txt" | awk '{print $1}')"
+check_eq "B18d  the ranking is as deep as asked for" "5" \
+         "$(parse_profile_top 5 < "${FIXTURES}/perf-report.txt" | wc -l | tr -d ' ')"
+
+# B19 -- user-mode CPU nanoseconds, which is the denominator every percentage
+# above is a share of. Without it the table is a set of shares of nothing.
+check_eq "B19  the event count is the denominator" "3643643640" \
+         "$(parse_profile_event_count < "${FIXTURES}/perf-report.txt")"
+
+# B20 -- the exact sample count is NOT in the report: its header abbreviates
+# ("Samples: 3K"). perf record prints the exact figure on standard error, so
+# that is where it comes from, and this fixture is that line.
+check_eq "B20  the sample count comes from the recording" "727" \
+         "$(parse_profile_samples < "${FIXTURES}/perf-record-stderr.txt")"
+
+# B21 -- a recording that captured nothing prints no sample count at all. That
+# is a refusal, not a zero.
+printf '[ perf record: Woken up 1 times to write data ]\n[ perf record: Captured and wrote 0.002 MB /tmp/x.data ]\n' \
+  > "${SCRATCH}/no-samples.txt"
+out="$(parse_profile_samples < "${SCRATCH}/no-samples.txt" 2>&1)"; st=$?
+check_nonzero_exit "B21  a recording with no samples is an error, not a zero" "${st}"
+
+# B22 -- an output with no ranked lines at all.
+printf '# Samples: 0 of event %s\n#\n' "'cpu-clock:u'" > "${SCRATCH}/no-rows.txt"
+out="$(parse_profile_top 5 < "${SCRATCH}/no-rows.txt" 2>&1)"; st=$?
+check_nonzero_exit "B22  a report with no ranked symbols is an error" "${st}"
+
+# B23 -- and one whose header is gone, so the event cannot be confirmed. An
+# unconfirmed event means an unconfirmed scope, which means no claims.
+printf '    20.58%%  shardkv  libc.so.6  [.] recv\n' > "${SCRATCH}/no-header.txt"
+out="$(parse_profile_event < "${SCRATCH}/no-header.txt" 2>&1)"; st=$?
+check_nonzero_exit "B23  a report with no event header is an error" "${st}"
+
+# B24 -- unresolved addresses. A profile whose symbols did not resolve fails
+# quietly: every number is there, and none of them has a name.
+pct="$(parse_profile_unresolved < "${FIXTURES}/perf-report.txt")"
+if [[ -n "${pct}" ]] && awk -v p="${pct}" 'BEGIN{exit !(p > 0 && p < 50)}'; then
+  ok "B24  the unresolved share is measured"
+else
+  bad "B24  unresolved share" "got '${pct}', expected a percentage between 0 and 50"
+fi
+
+echo "== the profiling script (cases B10-B17) =="
+
+# B10 -- no perf, no profile. Provoked by configuration: PERF names the binary.
+out="$(BENCH_PERF="${SCRATCH}/there-is-no-perf-here" "${HERE}/profile.sh" 2>&1)"; st=$?
+check_nonzero_exit "B10a  no perf is a refusal" "${st}"
+check_contains "B10b  and it says what is missing" "${out}" "perf"
+
+# B11 -- perf present but not permitted. The message must carry what perf itself
+# said, and must NOT assert a single cause: the same failure comes from the
+# container's syscall filter, from perf_event_paranoid, and from a kernel
+# without the tooling. Naming one of those as THE reason sends people to fix
+# the wrong thing.
+fake_perf="${SCRATCH}/perf-denied"
+printf '#!/bin/sh\necho "No permission to enable task-clock event." >&2\nexit 255\n' > "${fake_perf}"
+chmod +x "${fake_perf}"
+out="$(BENCH_PERF="${fake_perf}" "${HERE}/profile.sh" 2>&1)"; st=$?
+check_nonzero_exit "B11a  a denied perf is a refusal" "${st}"
+check_contains "B11b  and it quotes what perf said" "${out}" "No permission to enable"
+check_contains "B11c  and it offers the candidate causes" "${out}" "perf_event_paranoid"
+
+# B12 -- the same environment contract every other measurement follows.
+before="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+empty2="${SCRATCH}/no-cache-for-profile"
+mkdir -p "${empty2}"
+BUILD_DIR="${empty2}" "${HERE}/profile.sh" > /dev/null 2>&1; st=$?
+after="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+check_nonzero_exit "B12a  no environment record, no profile" "${st}"
+check_eq "B12b  and nothing is published" "${before}" "${after}"
+
+# B13 -- a real run, if this machine can take one. When it cannot, the assertion
+# is that the script REFUSES rather than that it produces something: both
+# outcomes are definite, and neither is a skip.
+before="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+produced="$(BENCH_PROFILE_SECONDS=3 BENCH_REQUESTS=20000 BENCH_CLIENTS=8 \
+            "${HERE}/profile.sh" 2>"${SCRATCH}/b13.err")"; st=$?
+after="$(ls "${BENCH_RESULTS}" 2>/dev/null | wc -l)"
+if [[ "${st}" -eq 0 ]]; then
+  ok "B13a  a profile was recorded on this machine"
+  for f in environment.txt profile.raw profile.txt; do
+    if [[ -s "${produced}/${f}" ]]; then ok "B13   ${f} is present and not empty"
+    else bad "B13   ${f}" "missing or empty"; fi
+  done
+  # B14 -- units in the names, because a bare number invites the reader to
+  # supply their own.
+  for field in profile_samples user_cpu_seconds kernel_cpu_seconds; do
+    check_contains "B14   ${field} is recorded" "$(cat "${produced}/profile.txt")" "${field}"
+  done
+  # B15 -- the denominator is not optional.
+  ucpu="$(sed -n 's/^user_cpu_seconds: *//p' "${produced}/profile.txt")"
+  kcpu="$(sed -n 's/^kernel_cpu_seconds: *//p' "${produced}/profile.txt")"
+  if [[ -n "${ucpu}" && -n "${kcpu}" ]]; then ok "B15  both halves of the CPU time are recorded"
+  else bad "B15  cpu time" "user='${ucpu}' kernel='${kcpu}'"; fi
+else
+  ok "B13a  this machine cannot record a profile, and the script refuses"
+  check_eq "B13b  and publishes nothing" "${before}" "${after}"
+  printf '     profile.sh said:\n'; sed 's/^/       /' "${SCRATCH}/b13.err"
+fi
+
+# B16 -- a floor under the sample count, kept where the request floor is kept.
+if (( BENCH_MIN_SAMPLES_SEEN >= 100 )); then
+  ok "B16  the script keeps a floor under the sample count"
+else
+  bad "B16  sample floor" "BENCH_MIN_SAMPLES is ${BENCH_MIN_SAMPLES_SEEN}"
+fi
+
+# B17 -- the load has to still be running when the window closes AND to have
+# done something in it. A background loop whose every iteration fails in
+# milliseconds stays alive from start to finish and covers nothing. Driven as a
+# pure function so all three ways of failing can be provoked exactly.
+out="$(profile_load_ok 0 0 yes 2>&1)"; st=$?
+check_nonzero_exit "B17a  a load that completed no rounds is refused" "${st}"
+check_contains "B17b  and it says so" "${out}" "no iterations"
+
+out="$(profile_load_ok 5 0 yes 2>&1)"; st=$?
+check_nonzero_exit "B17c  a load that issued no requests is refused" "${st}"
+check_contains "B17d  even though it was running" "${out}" "not loading"
+
+out="$(profile_load_ok 5 5000 no 2>&1)"; st=$?
+check_nonzero_exit "B17e  a load that finished early is refused" "${st}"
+check_contains "B17f  and names the idle part of the window" "${out}" "idle"
+
+profile_load_ok 5 5000 yes > /dev/null 2>&1
+check_zero_exit "B17g  a load that covered the window is accepted" "$?"
+
+# B17h -- counting rounds in a log that has none. `grep -c` prints its zero and
+# THEN exits non-zero, so the obvious `|| echo 0` appends a second line and the
+# arithmetic that follows dies with a syntax error -- on the one path this check
+# exists to report. Asserted here because it is invisible everywhere else: the
+# happy path never reaches it.
+: > "${SCRATCH}/empty-load.log"
+rounds="$(grep -c 'requests per second' "${SCRATCH}/empty-load.log" 2>/dev/null)" || rounds=0
+if [[ "${rounds}" == "0" ]]; then ok "B17h  an empty load log counts as zero rounds, once"
+else bad "B17h  empty load log" "counted '${rounds}', which will not survive arithmetic"; fi
+
+echo "== profile.sh keeps its distance (case B24b) =="
+
+# It is not one of run-all's measurements: it needs a runtime privilege the other
+# four do not, and run-all failing by default would take bench_smoke down with it
+# in all three builds.
+if grep -qE 'for measurement in .*profile' "${HERE}/run-all.sh"; then
+  bad "B24b run-all does not run the profiler" "profile is in run-all's list"
+else
+  ok "B24b run-all does not run the profiler"
+fi
+if [[ -x "${HERE}/profile.sh" ]]; then ok "B24c profile.sh is executable"
+else bad "B24c profile.sh" "not executable; git update-index --chmod=+x benchmarks/profile.sh"; fi
 
 echo
 echo "passed ${passed}, failed ${failed}"

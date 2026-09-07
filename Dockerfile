@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       redis-tools \
       redis-server \
+      linux-tools-common \
+      linux-tools-generic \
     && rm -rf /var/lib/apt/lists/*
 
 # g++-13 for complete C++20 support. Pinned as the default so that CMake, the
@@ -42,5 +44,27 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
 # toolchain: the protocol conformance work needs a real redis-cli and a real
 # redis-benchmark, at a version that is pinned rather than whatever the host
 # happens to have.
+
+# linux-tools is perf, for benchmarks/profile.sh. Two things about it that will
+# otherwise be rediscovered painfully:
+#
+# The `perf` on PATH is a wrapper that execs the build matching `uname -r`, and
+# in a container that is the HOST's kernel version, which is not installed here.
+# So the wrapper fails and the real binary lives at /usr/lib/linux-tools/*/perf.
+# profile.sh looks there; nothing needs fixing, but the first person to run
+# `perf` by hand will think it does.
+#
+# And perf_event_open is blocked by Docker's default seccomp profile, so a
+# profile needs --security-opt seccomp=unconfined -- the same flag the thread
+# sanitizer build already needs, for a different syscall. Without it perf says
+# "No permission to enable task-clock event", which reads as a kernel setting
+# and is not one. profile.sh prints the candidates rather than guessing.
+#
+# NOTE: this package is deliberately NOT added to .github/workflows/ci.yml,
+# which keeps its own apt list. CI runners will not sample anyway, and
+# benchmarks/self_test.sh asserts profile.sh's REFUSAL there rather than
+# skipping the case -- both outcomes are definite. The two lists usually have to
+# change together; this is the exception, and it is written down here so it
+# reads as a decision rather than as the omission it looks like.
 
 WORKDIR /src

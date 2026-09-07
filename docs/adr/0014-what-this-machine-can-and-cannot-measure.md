@@ -1,6 +1,6 @@
 # What this machine can and cannot measure
 
-summary: There is no scaling curve and no profile in this repository, because the only available machine is virtualised and its PMU is not reachable; throughput, latency, memory and the cross-shard penalty are measured against a same-machine Redis control group, and the difference is what is claimed rather than the absolute figures.
+summary: There is no scaling curve and no hardware-counter measurement in this repository, because every available machine is virtualised and its PMU is not reachable; a software-timer sampling profile is possible and is taken, under the limits recorded in 0017; throughput, latency, memory and the cross-shard penalty are measured against a same-machine Redis control group, and the difference is what is claimed rather than the absolute figures.
 
 ## Context
 
@@ -11,22 +11,35 @@ most wants to be able to write.
 
 It cannot be written, and the reason is the machine.
 
-`perf`'s hardware counters are not exposed under virtualisation. The only
-machine available is Docker-on-Windows, whose backend is WSL2, so entering WSL2
-directly changes nothing: it is the same hypervisor. Renting bare metal would
-solve it and was declined.
+`perf`'s hardware counters are not exposed under virtualisation, and every
+machine this has been developed on is virtualised. The first was
+Docker-on-Windows, whose backend is WSL2, so entering WSL2 directly changed
+nothing: it was the same hypervisor. The second is a Linux VM on an Apple
+Silicon Mac, checked rather than assumed — the guest exposes no CPU event source
+at all, and `perf list` returns no hardware event. Renting bare metal would solve it and
+was declined.
 
-Two consequences, and it is worth separating them because only one is about
-tooling:
+Three consequences. The first two are about the hardware; the third is about
+which claims survive.
 
-- **The PMU is simply absent.** No `perf record`, no flame graph, no `perf stat`
-  for cache misses or false sharing. Confirmed rather than assumed: `perf` is not
-  installed in the image, and would not have working counters if it were.
+- **The PMU is absent.** No cache-miss counts, no instructions-per-cycle, no
+  `perf c2c` for false sharing. On an ARM host false sharing would additionally
+  need the Statistical Profiling Extension, which is not there either.
+- **A sampling profile is nevertheless possible.** The kernel can raise a
+  periodic interrupt from a software timer that has nothing to do with the
+  hardware counters, and that is enough for a hot-spot profile. It is taken, and
+  what may be concluded from it is a decision of its own:
+  `0017-the-profile-sees-user-space-only.md`. Hardware counters and sampling
+  profiles are two capabilities, not one, and this record used to conflate them.
 - **The scaling curve would be measurable and meaningless.** Numbers would come
   out. But hypervisor scheduling smears them: the cores a benchmark sees are not
   cores it owns, and a curve drawn through them describes the scheduler as much
   as the architecture. A number that cannot be attributed is worse than no
-  number, because it looks like evidence.
+  number, because it looks like evidence. On the Apple Silicon machine there is a
+  second, independent reason: its cores are not interchangeable. Some are
+  performance cores and some are efficiency cores, the host decides which a shard
+  lands on, and a design whose premise is one loop per core cannot be charted on
+  a machine whose cores differ from one another.
 
 ## Decision
 
@@ -34,9 +47,14 @@ tooling:
 repository, not in the README, not anywhere the project's claims are repeated.
 The sentence "throughput grows roughly linearly with cores" is unavailable.
 
-**No profiling section.** The technical document's §8.3 — `perf record`, flame
-graphs, `perf stat` for cache-miss and false-sharing — is unrunnable here and is
-marked so rather than quietly skipped.
+**No hardware-counter measurement.** The part of the technical document's §8.3
+that needs the PMU — `perf stat` for cache-miss, false-sharing analysis — is
+unrunnable here and is marked so rather than quietly skipped.
+
+**A sampling profile is taken.** The rest of §8.3 — where this program's own time
+goes — is runnable with a software timer, and `benchmarks/profile.sh` runs it.
+The limits that come with that instrument, and the claims it does and does not
+support, are in `0017-the-profile-sees-user-space-only.md`.
 
 **What is measured instead**, all of it labelled as taken on a virtual machine
 with neighbour noise: throughput and pipelined throughput, the latency

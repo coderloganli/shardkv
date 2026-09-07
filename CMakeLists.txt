@@ -100,6 +100,21 @@ foreach(area parser encoder store expiry dispatch unique_fd integration
   gtest_discover_tests(${area}_test)
 endforeach()
 
+# The allocation suite is registered only where it can mean anything.
+#
+# It counts calls to global operator new, and a sanitizer runtime allocates on
+# its own account in quantities that swamp what this server does. Building it
+# under one would not make it fail -- it would make it pass or fail for reasons
+# that have nothing to do with the request path, which is worse. The suite is
+# absent from those builds on purpose, and tests/alloc_test.cc refuses to
+# compile under a sanitizer as a second lock.
+if(SHARDKV_SANITIZER STREQUAL "none" OR SHARDKV_SANITIZER STREQUAL "")
+  add_executable(alloc_test tests/alloc_test.cc)
+  target_link_libraries(alloc_test PRIVATE shardkv_lib GTest::gtest_main)
+  target_include_directories(alloc_test PRIVATE tests)
+  gtest_discover_tests(alloc_test)
+endif()
+
 # The two suites that drive the benchmark helper need to know where it was built.
 # A hard-coded relative path would work from one build directory and not another.
 foreach(area bench sharding)

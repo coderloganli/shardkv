@@ -42,6 +42,17 @@ if (( BENCH_REQUESTS < BENCH_MIN_REQUESTS )); then
   BENCH_REQUESTS="${BENCH_MIN_REQUESTS}"
 fi
 BENCH_CLIENTS="${BENCH_CLIENTS:-50}"
+
+# The floor under a profile, for the same reason there is one under a request
+# count: it is the difference between a measurement and noise. A hot-spot
+# ordering read off a handful of samples is not a weaker ordering, it is a
+# different one, and `bench_number` would let it through because it only refuses
+# things that are not numbers.
+BENCH_MIN_SAMPLES="${BENCH_MIN_SAMPLES:-500}"
+# How long the recording window is, and how much of the profile is allowed to
+# have landed on addresses that did not resolve to a name.
+BENCH_PROFILE_SECONDS="${BENCH_PROFILE_SECONDS:-20}"
+BENCH_MAX_UNRESOLVED="${BENCH_MAX_UNRESOLVED:-25}"
 BENCH_ROUNDS="${BENCH_ROUNDS:-10}"
 BENCH_SHARDS="${BENCH_SHARDS:-$(nproc)}"
 BENCH_PIPELINE="${BENCH_PIPELINE:-16}"
