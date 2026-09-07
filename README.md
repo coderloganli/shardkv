@@ -18,6 +18,41 @@ request path.
 > written down and committed before the runs. **Three of the five predictions
 > failed, and those are the interesting part.**
 
+**Contents** — [the idea](#the-idea) · [built with](#built-with) ·
+[scope](#scope) · [building](#building) · [the test suite](#the-test-suite) ·
+[what it measures out at](#what-it-measures-out-at) ·
+[where the time goes](#where-the-time-goes) ·
+[known limitations](#known-limitations) · [design notes](#design-notes)
+
+## Results at a glance
+
+All from one x86_64 machine, named in full below, against `redis-server` running
+on it at the same time. Every figure has its script and its raw output recorded
+beside it, and the sections below give each one its conditions.
+
+| | shardkv vs `redis-server`, same machine |
+|---|---|
+| Throughput, 50 connections, generator not the bottleneck | **3.5x – 4.8x** |
+| Throughput, 50 connections, `redis-benchmark` as specified (single-threaded) | **0.64x – 0.65x** — the generator's ceiling, not the server's |
+| Throughput, 50 connections, pipelined `-P 16` | **0.78x – 0.82x** |
+| Latency p50, one connection | **81% slower** (0.143 ms vs 0.079 ms) |
+| Memory, ~632k keys | **1.28x** |
+
+**One sentence for all of it: this design trades per-request latency for
+parallelism.** A key on its own loop costs about what Redis costs. A key on
+another loop costs 0.064 ms more, and at eight shards seven requests in eight
+are that. Give it a load that can keep eight loops busy and it wins by three to
+five times; give it one connection, or a client that is itself the bottleneck,
+and it loses.
+
+**What is deliberately not claimed:** anything about how throughput scales with
+cores. That needs a machine whose cores are its own, and every machine available
+was virtualised, where the host's scheduler shapes the curve as much as the
+architecture does. Separately, and for a different reason — no readable
+performance counters — there are no cache-miss or false-sharing figures either.
+[Both are written down](docs/adr/0014-what-this-machine-can-and-cannot-measure.md)
+rather than left as gaps.
+
 ## The idea
 
 ```
@@ -47,12 +82,32 @@ A key that lands on the loop its connection belongs to is served without crossin
 a thread and without taking a lock, and without allocating as long as its reply
 fits inside a `std::string`'s own storage -- a boundary that is counted by a
 test rather than asserted, and described under "Known limitations". A key that
-does not land locally is forwarded to the owning loop as a message. That is the trade: synchronisation cost is paid per
-cross-shard request rather than per access, which pays off because the
-overwhelming majority of real Redis traffic is single-key commands.
+does not land locally is forwarded to the owning loop as a message.
+
+That is the trade: synchronisation cost is paid per cross-shard request rather
+than per access, which pays off because the overwhelming majority of real Redis
+traffic is single-key commands.
 
 The honest cost: cross-shard commands (`MGET`, `MSET`, multi-key `DEL`) take an
 extra hop and will be slower than single-threaded Redis on that path.
+
+## Built with
+
+| | |
+|---|---|
+| Language | C++20 — RAII throughout, move semantics, no exceptions on the request path |
+| Concurrency | one thread per shard, shared-nothing; a lock-free MPSC queue and an `eventfd` are the only channel between threads |
+| I/O | `epoll`, level-triggered; non-blocking sockets; `SO_REUSEPORT` so the kernel assigns connections; optional CPU affinity |
+| Protocol | RESP2, parsed by a pure function — bytes in, a command or "need more" or an error out |
+| Storage | `std::unordered_map` per shard, keys hashed with xxHash; expiry both lazy and sampled |
+| Build | CMake, Ninja, a `Dockerfile` that pins the whole toolchain |
+| Tests | GoogleTest; ASan, UBSan and ThreadSanitizer all run in CI; a shell harness that tests the benchmark scripts themselves |
+| Measurement | `redis-benchmark` and a same-machine `redis-server` control group; `perf` for sampling profiles |
+
+Decisions that could have gone either way are recorded one per file in
+[`docs/adr/`](docs/adr/) — why shared-nothing rather than a locked table, why
+level-triggered rather than edge-triggered, why the standard library's hash
+table stayed, and what this machine can and cannot measure.
 
 ## Why RESP
 
@@ -121,8 +176,8 @@ Docker; `docs/architecture.md` says why.
 
 ## The test suite
 
-`ctest` runs **233 entries**. 232 are GoogleTest cases; the 233rd, `bench_smoke`,
-is a shell harness of 161 assertions that tests the benchmark scripts themselves —
+`ctest` runs **234 entries**. 233 are GoogleTest cases; the 234th, `bench_smoke`,
+is a shell harness of 162 assertions that tests the benchmark scripts themselves —
 the parsers that read `redis-benchmark` and `perf` output, the rule that
 classifies a run as local or cross-shard, and each script's refusal to produce a
 figure it cannot stand behind.
@@ -130,7 +185,7 @@ figure it cannot stand behind.
 The GoogleTest cases sit roughly where the risk is: 32 on the store, 28 on the
 RESP parser, 26 on expiry, 16 integration, 13 on dispatch, 12 each on sharding
 and on `MGET`/`MSET` scatter/gather, 9 each on the reply slots, the MPSC queue
-and the encoder, 8 counting heap allocations on the request path, 7 on
+and the encoder, 9 counting heap allocations on the request path, 7 on
 backpressure, and the rest on routing, buffers, ordering, fault injection,
 connection lifetime and the cross-shard counter.
 
