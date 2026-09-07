@@ -44,8 +44,10 @@ values, connections and buffers each belong to one thread for their whole life -
 and the only channel between them is a message queue.
 
 A key that lands on the loop its connection belongs to is served without crossing
-a thread, taking a lock, or allocating. A key that does not is forwarded to the
-owning loop as a message. That is the trade: synchronisation cost is paid per
+a thread and without taking a lock, and without allocating as long as its reply
+fits inside a `std::string`'s own storage -- a boundary that is counted by a
+test rather than asserted, and described under "Known limitations". A key that
+does not land locally is forwarded to the owning loop as a message. That is the trade: synchronisation cost is paid per
 cross-shard request rather than per access, which pays off because the
 overwhelming majority of real Redis traffic is single-key commands.
 
@@ -119,37 +121,41 @@ Docker; `docs/architecture.md` says why.
 
 ## The test suite
 
-`ctest` runs **225 entries**. 224 are GoogleTest cases; the 225th, `bench_smoke`,
-is a shell harness of 86 assertions that tests the benchmark scripts themselves —
-the parser that reads `redis-benchmark`'s output, the rule that classifies a run
-as local or cross-shard, and each script's refusal to produce a figure it cannot
-stand behind.
+`ctest` runs **233 entries**. 232 are GoogleTest cases; the 233rd, `bench_smoke`,
+is a shell harness of 161 assertions that tests the benchmark scripts themselves —
+the parsers that read `redis-benchmark` and `perf` output, the rule that
+classifies a run as local or cross-shard, and each script's refusal to produce a
+figure it cannot stand behind.
 
 The GoogleTest cases sit roughly where the risk is: 32 on the store, 28 on the
 RESP parser, 26 on expiry, 16 integration, 13 on dispatch, 12 each on sharding
 and on `MGET`/`MSET` scatter/gather, 9 each on the reply slots, the MPSC queue
-and the encoder, 7 on backpressure, and the rest on routing, buffers, ordering,
-fault injection, connection lifetime and the cross-shard counter.
+and the encoder, 8 counting heap allocations on the request path, 7 on
+backpressure, and the rest on routing, buffers, ordering, fault injection,
+connection lifetime and the cross-shard counter.
 
 CI builds three ways and runs the whole suite in each: Release, ASan+UBSan, and
 TSan. All three are green on x86_64 — the badge above is the live answer.
 
-**One result depends on the machine, and it is worth saying why.** On an
-`aarch64` host — Docker Desktop's Linux VM on Apple Silicon — 224 of the 225
-pass and `bench_smoke` loses 5 of its 86 assertions. Every one of the five traces
-back to a single fact: that VM does not expose a CPU identity. `/proc/cpuinfo`
-carries no `model name` field at all, and `lscpu` answers `Vendor ID: Apple`,
-`Model name: -`, `CPU part 0x000`. So `benchmarks/environment.sh` cannot complete
-an environment record, refuses to emit a partial one, and the four measurement
-scripts refuse in turn to measure anything without it.
+**Two suites do not run in every build, and both say so rather than being
+quietly absent.** The allocation suite counts calls to `operator new`, which a
+sanitizer runtime makes meaningless, so it is registered only where no sanitizer
+is configured — and `tests/alloc_test.cc` refuses to compile under one, as a
+second lock. `benchmarks/profile.sh` needs `perf` and a relaxed syscall filter;
+where it cannot have them it refuses, and the smoke test asserts the refusal.
+Neither case is skipped: both outcomes are definite and both are checked.
 
-That is the recorder working, not failing. A figure whose machine cannot be named
-is not a figure this project will publish, and the same principle is what
-`docs/adr/0014-what-this-machine-can-and-cannot-measure.md` applies to the
-scaling curve. The consequence is worth stating plainly: **no measurement in
-this README can be reproduced on such a machine** — the scripts will decline
-before they run. The numbers below came from an x86_64 host, which is named
-beside them.
+**On a machine that cannot name its own CPU.** An `aarch64` Linux guest on
+Apple Silicon is told nothing about its processor — `/proc/cpuinfo` carries no
+`model name` line at all, and `lscpu` answers `Vendor ID: Apple`,
+`Model name: -`, `CPU part 0x000`. The environment recorder will not invent one,
+so for a while nothing could be measured there at all.
+
+It is not invented now either. The operator may **assert** it, the record marks
+the value `(asserted)` where every reader will see it, the recorder warns while
+doing it, and with neither a detected nor an asserted value it still refuses —
+`docs/adr/0018-an-environment-field-may-be-asserted-never-guessed.md` sets out
+why an assertion is a record and a guess is not.
 
 ## What it measures out at
 
@@ -162,13 +168,18 @@ they are what the figures mean.
 `-O2` via `CMAKE_BUILD_TYPE=Release`; `redis-server` and `redis-benchmark` both
 7.0.15; load generated on the same machine; threads not pinned. Eight shards.
 
-**What is not here, and why.** There is **no scaling curve and no profile.** The
-machine is virtualised and its PMU is unreachable, so a curve drawn on it would
-describe the hypervisor's scheduler as much as this architecture, and `perf`'s
-counters do not exist to be read. **No claim is made anywhere that throughput
-scales linearly, or in any particular way, with cores.** What replaces it is a
-control group under identical conditions —
+**What is not here, and why.** There is **no scaling curve, and nothing measured
+with a hardware counter** — no cache-miss figures, no instructions-per-cycle, no
+false-sharing analysis. The machine is virtualised and its PMU is unreachable,
+so a curve drawn on it would describe the hypervisor's scheduler as much as this
+architecture, and the counters do not exist to be read. **No claim is made
+anywhere that throughput scales linearly, or in any particular way, with
+cores.** What replaces it is a control group under identical conditions —
 `docs/adr/0014-what-this-machine-can-and-cannot-measure.md` has the reasoning.
+
+A *sampling* profile needs no counters and is a separate thing: it is under
+"Where the time goes" below, taken on a different machine, and it carries its
+own account of what it can and cannot support.
 
 ### Throughput, and the instrument that was measuring itself
 
@@ -311,6 +322,97 @@ over eighty thousand requests on fifty connections. **That is evidence the desig
 is the one described. It is not evidence that it scales well**, and the two are
 easy to blur.
 
+## Where the time goes
+
+A separate experiment, on a **different machine and a different architecture**
+from every figure above, and therefore not comparable with any of them. It is
+here because it answers a question the tables above cannot: not how fast this
+server is, but what it spends itself on.
+
+**The machine.** Apple M5 Pro, 18 cores across two performance levels; an
+`aarch64` Linux VM on macOS; g++ 13.3.0, `RelWithDebInfo`. Eight shards, load
+generated on the same machine. The CPU model is **asserted, not detected** —
+this guest is not told what it runs on — and the record says so.
+
+**Read this before the table.** There is no PMU here, so the sampling is driven
+by a software timer, and an unprivileged process may not sample the kernel. This
+profile therefore sees **user-mode CPU time only**. In the run below the server
+spent **13.1 seconds of user CPU and 31.6 seconds in the kernel**, so the table
+covers a little under a third of what it actually did.
+
+Where that other two thirds went, this profile does not say. The kernel was not
+sampled at all, so nothing here attributes it to any particular call — the
+figure is a total, and only a total. It is consistent with the picture the
+visible third paints, and consistency is not attribution.
+`docs/adr/0017-the-profile-sees-user-space-only.md` sets out the difference.
+
+20 seconds, 13,478 samples, 11 million requests of load, 5.8% of samples on
+addresses that did not resolve.
+
+| share of user-mode time | symbol |
+|---|---|
+| 18.16% | `recv` |
+| 11.38% | `__send` |
+| 9.66% | `read` |
+| 6.72% | `write` |
+| 6.61% | `epoll_pwait` |
+| 4.84% | `Loop::drainInbox` |
+| 3.05% | `Loop::run` |
+| 2.03% | `runOnShard` |
+| 1.92% | `malloc` |
+| 1.65% | `memcmp` |
+| 1.47% | `dispatch` |
+
+**What it supports.** The five system-call wrappers are better than half of the
+visible time, and the store's lookup does not appear near the top at all. Add
+that the kernel's share of total CPU is more than twice the part this table
+covers, and the reading is that **this server's cost is dominated by the kernel
+boundary rather than by anything it computes** — a reading, drawn from two
+measurements that point the same way, not a single figure that proves it.
+
+**What it does not support.** Any sentence of the form "X% of the time is spent
+in Y". The denominator of that column is user-mode CPU, which is 29% of this
+server's CPU and an unknown fraction of its wall-clock. Nor does a wrapper's
+share say whether that call is cheap or expensive; the expensive part was never
+sampled.
+
+**What it changed.** Two things, and neither was the thing that looks obvious.
+
+`docs/adr/0001-use-the-standard-library-hash-table-first.md` had deferred a
+decision until there was a profile: write a hand-written open-addressing table,
+or keep `std::unordered_map`. **The table stays.** It is not where the time
+goes, and a faster one would compete for a slice of the smaller share. That is a
+measured decision not to do a piece of work, and it took the profile to make it.
+
+The change that was worth making was invisible in this table. `malloc` and
+`cfree` are in it, and they say nothing about what the allocations were *for*.
+An allocation counter — `tests/alloc_test.cc`, not a profiler — found the reply
+queue taking a heap block every sixth command, on every connection, forever.
+That was the whole of the gap between this server and its own published claim
+that a common command allocates nothing. It is a ring buffer now
+(`docs/adr/0019-the-reply-queue-is-a-ring-not-a-deque.md`), and `PING` and a
+small local `GET` allocate nothing per request. **A profiler told us where not
+to look; a different instrument found what to fix.**
+
+**What is deliberately not attempted here.** No cache-miss counts, no
+instructions-per-cycle, no false-sharing analysis, and no scaling curve. Those
+need the hardware counters this machine does not expose, and the scaling curve
+additionally needs cores that are interchangeable — which, on a chip with two
+performance levels chosen by a host scheduler, these are not.
+
+Reproduce it with:
+
+```
+docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src shardkv-dev \
+  bash -c 'cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build \
+           && BENCH_CPU_MODEL="<what this machine is>" benchmarks/profile.sh'
+```
+
+The syscall filter has to be relaxed for `perf_event_open`, which is the same
+flag the thread-sanitizer build needs for a different syscall. Without it the
+script refuses and says so; it does not guess which of the three possible causes
+it was.
+
 ## Watching it under load
 
 `scripts/soak.sh` keeps load on the server and samples RSS, the open descriptor
@@ -333,6 +435,13 @@ rather than of the design. Nothing here is scheduled: the four steps this
 project set out to do are done, so each of these is a known cost being paid
 knowingly, not work already queued up:
 
+- **A reply larger than a `std::string`'s own storage costs two allocations.**
+  One to hold its bytes and one to give them back. The shard encodes into a
+  string before the slot hands it to the write buffer; encoding straight into
+  that buffer would remove both, and would change what dispatch is — it would
+  write replies rather than return them — reaching into the ordered-slot design.
+  Counted by `tests/alloc_test.cc` rather than estimated. Small replies, and
+  `PING`, allocate nothing.
 - **A connection keeps a buffer as large as its largest burst.** The consumed
   prefix is compacted away, so a buffer no longer grows with the number of
   requests a connection has served -- but the allocation itself is kept and

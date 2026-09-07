@@ -1,0 +1,9 @@
+profile_samples: 13478
+profile_seconds: 20
+shards: 8
+load_rounds: 11
+load_requests: 11000000
+unresolved_percent: 5.84
+sampled_user_ns: 13491491478
+user_cpu_seconds: 13.140
+kernel_cpu_seconds: 31.600

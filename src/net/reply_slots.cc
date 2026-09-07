@@ -84,20 +84,42 @@ std::string encodeAggregate(const Aggregate& aggregate) {
 
 }  // namespace
 
+Slot& ReplySlots::atIndex(std::size_t i) {
+  return ring_[(head_ + i) % ring_.size()];
+}
+
+const Slot& ReplySlots::atIndex(std::size_t i) const {
+  return ring_[(head_ + i) % ring_.size()];
+}
+
+// Doubling, and never shrinking. A connection that once queued deeply keeps the
+// room to do it again, which is the same bargain the read and write buffers
+// strike: the memory is bounded by the deepest burst the connection ever had,
+// and in exchange the steady state allocates nothing at all.
+void ReplySlots::grow() {
+  const std::size_t wanted = ring_.empty() ? 8 : ring_.size() * 2;
+  std::vector<Slot> next(wanted);
+  for (std::size_t i = 0; i < size_; ++i) next[i] = std::move(atIndex(i));
+  ring_.swap(next);
+  head_ = 0;
+}
+
 std::uint32_t ReplySlots::reserve() {
+  if (size_ == ring_.size()) grow();
   const std::uint32_t slot = next_++;
-  slots_.emplace_back(std::monostate{});
+  atIndex(size_) = std::monostate{};
+  ++size_;
   return slot;
 }
 
-// slots_ is popped from the front as replies go out, so the number a slot
-// carries and its position in the deque drift apart. base_ is the offset
-// between them.
+// The queue is drained from the front as replies go out, so the number a slot
+// carries and its position in the ring drift apart. base_ is the offset between
+// them.
 Slot* ReplySlots::at(std::uint32_t slot) {
   if (slot < base_) return nullptr;  // already flushed and dropped
   const std::size_t index = slot - base_;
-  if (index >= slots_.size()) return nullptr;
-  return &slots_[index];
+  if (index >= size_) return nullptr;
+  return &atIndex(index);
 }
 
 void ReplySlots::fill(std::uint32_t slot, std::string resp) {
@@ -143,17 +165,23 @@ void ReplySlots::finishIfComplete(Slot& slot) {
 // The one place that decides what goes on the wire, which is why the ordering
 // invariant is checkable by reading one function rather than every handler.
 void ReplySlots::takeReadyPrefix(Buffer& out) {
-  while (!slots_.empty()) {
-    const auto* ready = std::get_if<std::string>(&slots_.front());
+  while (size_ > 0) {
+    Slot& front = atIndex(0);
+    const auto* ready = std::get_if<std::string>(&front);
     if (ready == nullptr) break;  // a gap; everything behind it waits
     out.append(*ready);
-    slots_.pop_front();
+    // Reset rather than merely step over: the slot holds the reply's bytes, and
+    // a ring that keeps its cells would hold every reply this connection has
+    // ever sent.
+    front = std::monostate{};
+    head_ = (head_ + 1) % ring_.size();
+    --size_;
     ++base_;
   }
 }
 
-bool ReplySlots::idle() const { return slots_.empty(); }
+bool ReplySlots::idle() const { return size_ == 0; }
 
-std::size_t ReplySlots::pendingForTest() const { return slots_.size(); }
+std::size_t ReplySlots::pendingForTest() const { return size_; }
 
 }  // namespace shardkv

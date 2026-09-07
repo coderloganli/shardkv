@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <deque>
 #include <optional>
 #include <string>
 #include <variant>
@@ -72,7 +71,7 @@ class ReplySlots {
   std::size_t pendingForTest() const;
 
  private:
-  // Slot numbers rise for the life of the connection while the deque is popped
+  // Slot numbers rise for the life of the connection while the queue is drained
   // from the front, so the two drift apart; base_ is the offset. Returns
   // nullptr for a slot already flushed, which is how a late reply for a
   // finished command is dropped rather than corrupting a live one.
@@ -81,9 +80,30 @@ class ReplySlots {
   // Encodes and replaces the slot once the last group has contributed.
   void finishIfComplete(Slot& slot);
 
-  std::deque<Slot> slots_;
+  // Where a slot lives in the ring. Only meaningful for i < size_.
+  Slot& atIndex(std::size_t i);
+  const Slot& atIndex(std::size_t i) const;
+  void grow();
+
+  // A ring over one allocation, rather than a std::deque.
+  //
+  // The deque this replaced allocated a fresh node every six commands and freed
+  // one every six replies, for the life of every connection -- a fixed cost per
+  // request that no amount of steady state amortised away, because a queue that
+  // stays shallow still walks forward through the deque's nodes. sizeof(Slot)
+  // is 80 and libstdc++ sizes its node at 512 bytes: six slots, then another
+  // allocation. That was measured, not deduced -- tests/alloc_test.cc counts it
+  // -- and it was the whole of the gap between this server and its own
+  // documented claim that a common command allocates nothing.
+  //
+  // The ring grows by doubling and never shrinks, which is the policy the read
+  // and write buffers already follow for the same reason:
+  // docs/adr/0011-buffers-compact-their-consumed-prefix-but-keep-their-capacity.md
+  std::vector<Slot> ring_;
+  std::size_t head_ = 0;    // where the front slot sits in ring_
+  std::size_t size_ = 0;    // how many slots are live
   std::uint32_t next_ = 0;  // next number to hand out
-  std::uint32_t base_ = 0;  // the number slots_[0] carries
+  std::uint32_t base_ = 0;  // the number the front slot carries
 };
 
 }  // namespace shardkv

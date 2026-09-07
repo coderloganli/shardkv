@@ -1,0 +1,64 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 3K of event 'cpu-clock:u'
+# Event count (approx.): 3643643640
+#
+# Overhead  Command  Shared Object        Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+# ........  .......  ...................  ..................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    20.58%  shardkv  libc.so.6            [.] recv
+    13.30%  shardkv  libc.so.6            [.] __send
+     6.26%  shardkv  libc.so.6            [.] read
+     4.56%  shardkv  libc.so.6            [.] epoll_pwait
+     4.56%  shardkv  shardkv              [.] shardkv::Loop::drainInbox()
+     3.98%  shardkv  libc.so.6            [.] write
+     2.75%  shardkv  shardkv              [.] shardkv::runOnShard(shardkv::Shard&, std::vector<std::basic_string_view<char, std::char_traits<char> >, std::allocator<std::basic_string_view<char, std::char_traits<char> > > > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, shardkv::LoopStats const&)
+     2.66%  shardkv  libc.so.6            [.] malloc
+     2.55%  shardkv  shardkv              [.] shardkv::Loop::run()
+     2.42%  shardkv  libc.so.6            [.] 0x00000000000a1940
+     2.20%  shardkv  libc.so.6            [.] memcmp
+     1.84%  shardkv  shardkv              [.] std::_Rb_tree<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, std::vector<unsigned long, std::allocator<unsigned long> > >, std::_Select1st<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, std::vector<unsigned long, std::allocator<unsigned long> > > >, std::less<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, std::vector<unsigned long, std::allocator<unsigned long> > > > >::find(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) const
+     1.48%  shardkv  libc.so.6            [.] cfree
+     1.18%  shardkv  shardkv              [.] shardkv::dispatch(shardkv::ShardRouter&, shardkv::ReplySlots&, unsigned int, unsigned long, std::vector<std::basic_string_view<char, std::char_traits<char> >, std::allocator<std::basic_string_view<char, std::char_traits<char> > > > const&, shardkv::LoopStats const&)
+     1.13%  shardkv  libc.so.6            [.] tolower
+     1.10%  shardkv  shardkv              [.] shardkv::dispatch(shardkv::ShardRouter&, shardkv::ReplySlots&, unsigned int, unsigned long, std::vector<std::basic_string_view<char, std::char_traits<char> >, std::allocator<std::basic_string_view<char, std::char_traits<char> > > > const&, shardkv::LoopStats const&)::{lambda(unsigned long, shardkv::Delivery, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > >, std::vector<unsigned int, std::allocator<unsigned int> >, unsigned int)#1}::operator()(unsigned long, shardkv::Delivery, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > >, std::vector<unsigned int, std::allocator<unsigned int> >, unsigned int) const
+     1.10%  shardkv  shardkv              [.] shardkv::parse(std::basic_string_view<char, std::char_traits<char> >, std::vector<std::basic_string_view<char, std::char_traits<char> >, std::allocator<std::basic_string_view<char, std::char_traits<char> > > >&, unsigned long&)
+     1.04%  shardkv  shardkv              [.] shardkv::(anonymous namespace)::readLine(std::basic_string_view<char, std::char_traits<char> >, unsigned long, std::basic_string_view<char, std::char_traits<char> >&, unsigned long&)
+     1.02%  shardkv  shardkv              [.] shardkv::(anonymous namespace)::parseCount(std::basic_string_view<char, std::char_traits<char> >)
+     0.93%  shardkv  shardkv              [.] memcpy@plt
+     0.82%  shardkv  libc.so.6            [.] 0x0000000000140674
+     0.80%  shardkv  shardkv              [.] shardkv::LoopRouter::send(unsigned long, shardkv::CrossShardRequest)
+     0.71%  shardkv  shardkv              [.] shardkv::(anonymous namespace)::lowered(std::basic_string_view<char, std::char_traits<char> >)
+     0.71%  shardkv  shardkv              [.] shardkv::Buffer::empty() const
+     0.66%  shardkv  libstdc++.so.6.0.33  [.] operator new(unsigned long)
+     0.63%  shardkv  shardkv              [.] shardkv::resp::encodeSimpleString(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&)
+     0.58%  shardkv  shardkv              [.] shardkv::ReplySlots::takeReadyPrefix(shardkv::Buffer&)
+     0.52%  shardkv  libc.so.6            [.] 0x00000000000a13c0
+     0.47%  shardkv  libc.so.6            [.] 0x00000000001405f4
+     0.47%  shardkv  shardkv              [.] __aarch64_swp8_acq_rel
+     0.47%  shardkv  shardkv              [.] shardkv::Loop::updateInterest(shardkv::Connection&)
+     0.44%  shardkv  libc.so.6            [.] 0x0000000000094e0c
+     0.44%  shardkv  libc.so.6            [.] 0x00000000000a1978
+     0.44%  shardkv  libc.so.6            [.] 0x00000000000a19a8
+     0.44%  shardkv  libstdc++.so.6.0.33  [.] operator delete(void*, unsigned long)
+     0.41%  shardkv  libc.so.6            [.] 0x00000000001405b4
+     0.41%  shardkv  shardkv              [.] shardkv::Buffer::consume(unsigned long)
+     0.41%  shardkv  shardkv              [.] shardkv::Connection::drainInput()
+     0.36%  shardkv  libc.so.6            [.] 0x0000000000081900
+     0.36%  shardkv  libc.so.6            [.] 0x0000000000094264
+     0.36%  shardkv  shardkv              [.] shardkv::Shard::set(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+     0.33%  shardkv  shardkv              [.] XXH_INLINE_XXH3_64bits
+     0.33%  shardkv  shardkv              [.] memcmp@plt
+     0.33%  shardkv  shardkv              [.] shardkv::ReplySlots::reserve()
+     0.30%  shardkv  libc.so.6            [.] 0x0000000000094db0
+     0.30%  shardkv  libc.so.6            [.] 0x0000000000094dcc
+     0.30%  shardkv  libstdc++.so.6.0.33  [.] malloc@plt
+     0.30%  shardkv  shardkv              [.] memchr@plt
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

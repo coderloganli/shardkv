@@ -92,8 +92,9 @@ therefore about 1/N for uniformly distributed keys.
    described below.
 
 Had `foo` belonged to Shard 2, step 3 would be followed straight by the lookup,
-the encode and the write: **no thread crossed, no lock taken, no allocation
-made.**
+the encode and the write: **no thread crossed and no lock taken.** Whether it
+also allocates depends on how big the reply is, and the boundary is measured
+rather than asserted -- see "Buffers belong to the connection" below.
 
 ### Replies leave in order, whatever order they arrive in
 
@@ -211,9 +212,28 @@ in production, so ownership is made structural rather than remembered.
 ### Buffers belong to the connection
 
 Each connection owns one read buffer and one write buffer, reused across
-requests rather than reallocated per request. On the common path -- a single-key
-command that lands on the local shard -- a steady-state request causes no heap
-allocation at all.
+requests rather than reallocated per request.
+
+**On the common path -- a single-key command that lands on the local shard --
+a steady-state request causes no heap allocation, provided the reply fits inside
+a `std::string`'s own storage.** That sentence used to end after "no heap
+allocation", and it was not true. `tests/alloc_test.cc` now counts allocations
+on the request path, and every clause it gained is one the counter forced:
+
+- **It was not true at all until the reply queue stopped being a `std::deque`.**
+  The deque took a fresh node every sixth command and returned one every sixth
+  reply, for the life of every connection -- 167 allocations per thousand
+  requests, for `PING` as much as for `GET`. It is a ring buffer now:
+  `docs/adr/0019-the-reply-queue-is-a-ring-not-a-deque.md`.
+- **A large reply still costs two allocations**, one to hold its bytes and one
+  to give them back, because the shard encodes into a `std::string` before the
+  slot hands it to the write buffer. Removing them would mean encoding straight
+  into that buffer, which changes the shape of dispatch and reaches into the
+  ordered-slot design. Not done, and not claimed.
+- **A key on another shard is outside this entirely**, and always was: its
+  arguments must be copied, because the read buffer they point into is reused
+  before the reply comes back. At eight shards that is seven requests in eight,
+  so the claim describes the local path and not the average one.
 
 **The consumed prefix is reclaimed; the capacity is not.** A buffer resets when
 it drains completely, and otherwise compacts -- moving the unread tail to the
@@ -363,9 +383,11 @@ was generated locally and whether threads were pinned; measurements live in
 down before the run. `docs/product.md` states the principle.
 
 **What this machine cannot measure is recorded rather than skipped.** The
-available machine is virtualised and its PMU is unreachable, so there is no
-scaling curve and no profile, and no claim about scaling with cores is made
-anywhere. What replaces them is a same-machine Redis control group, where the
+available machines are virtualised and their PMU is unreachable, so there is no
+scaling curve and nothing measured with a hardware counter, and no claim about
+scaling with cores is made anywhere. A sampling profile needs no counters and is
+taken: `benchmarks/profile.sh`, under the limits in
+`docs/adr/0017-the-profile-sees-user-space-only.md`. What replaces them is a same-machine Redis control group, where the
 difference is claimed rather than the absolutes, and the mechanism evidence from
 the sharding work -- keys demonstrably spread, the cross-shard path demonstrably
 taken, TSan silent under load. That evidence says shared-nothing is implemented

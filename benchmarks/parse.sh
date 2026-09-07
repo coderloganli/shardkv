@@ -274,3 +274,132 @@ penalty_report() {
     printf 'ranges_overlap: 0\n'
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Reading a sampling profile.
+#
+# The fixtures these are tested against are a REAL recording of this server
+# under load, not something written to match the code. That distinction has
+# already cost this project once: redis-benchmark draws its section headings at
+# the END of a line rather than on one of their own, and a parser built against
+# an invented sample found nothing in the real thing.
+#
+# Capturing the fixture caught a second one of the same kind. `perf report`
+# ABBREVIATES the sample count in its header -- "Samples: 3K" -- so the exact
+# figure cannot come from there. It comes from what `perf record` prints on
+# standard error, which is a different stream of a different command, and that
+# is why there are two fixtures.
+# ---------------------------------------------------------------------------
+
+# The event the profile was sampled on, e.g. cpu-clock:u.
+#
+# Parsed, and not assumed, because every claim made from a profile depends on
+# it. The `:u` suffix is what says the recording saw user space only; without
+# it the scope of the whole table is unknown, and an unknown scope supports no
+# claims at all.
+parse_profile_event() {
+  local line value
+  line="$(sed -n "s/^# Samples:.*of event '\\([^']*\\)'.*/\\1/p" | head -1)"
+  if [[ -z "${line}" ]]; then
+    echo "parse_profile_event: no '# Samples: ... of event' header in this report; the scope of the profile is unknown" >&2
+    return 1
+  fi
+  printf '%s\n' "${line}"
+}
+
+# The denominator: how much CPU time the samples are a sample OF, in the event's
+# own unit (nanoseconds, for the clock events). Every percentage in the table is
+# a share of this and of nothing else -- not of wall-clock, not of total CPU.
+parse_profile_event_count() {
+  local value
+  value="$(sed -n 's/^# Event count (approx.): *\([0-9]*\).*/\1/p' | head -1)"
+  if [[ -z "${value}" ]]; then
+    echo "parse_profile_event_count: no '# Event count' header in this report; the table would have no denominator" >&2
+    return 1
+  fi
+  printf '%s\n' "${value}"
+}
+
+# The exact sample count, from `perf record`'s standard error:
+#
+#   [ perf record: Captured and wrote 0.079 MB /tmp/x.data (727 samples) ]
+#
+# A recording that captured nothing prints that line WITHOUT the parenthesis --
+# verified, not assumed. So an absent count is an absent recording, which is a
+# refusal and not a zero.
+parse_profile_samples() {
+  local value
+  value="$(sed -n 's/.*(\([0-9]*\) samples).*/\1/p' | head -1)"
+  if [[ -z "${value}" ]]; then
+    echo "parse_profile_samples: perf record reported no sample count, which is what it does when it captured none" >&2
+    return 1
+  fi
+  printf '%s\n' "${value}"
+}
+
+# The ranked symbols, deepest first, as "<percent> <symbol>" a line.
+#
+# The symbol is everything after perf's level marker ([.] for user space, [k]
+# for kernel), and C++ symbols contain spaces, so it is taken as the rest of the
+# line rather than as a field.
+parse_profile_top() { # depth
+  local depth="${1:-10}" out
+  out="$(sed -n 's/^ *\([0-9.]*\)%.*\[[.k]\] \(.*\)$/\1 \2/p' \
+         | sed 's/ *$//' | head -"${depth}")"
+  if [[ -z "${out}" ]]; then
+    echo "parse_profile_top: no ranked symbols in this report" >&2
+    return 1
+  fi
+  printf '%s\n' "${out}"
+}
+
+# What share of the SAMPLES landed on an address instead of a function.
+#
+# A profile whose symbols did not resolve fails in the quietest way there is:
+# every number is present and none of them means anything. This is the check
+# that turns that into a refusal.
+#
+# Weighted by each row's share, not counted by rows. The two disagree a lot: a
+# long tail of tiny unnamed rows is a quarter of the ROWS in the fixture and a
+# far smaller part of the TIME, and it is the time that decides whether the
+# profile can be read. Counting rows would refuse profiles that are perfectly
+# legible and accept ones that are not.
+parse_profile_unresolved() {
+  local rows
+  rows="$(sed -n 's/^ *\([0-9.]*\)%.*\[[.k]\] \(.*\)$/\1 \2/p')"
+  if [[ -z "${rows}" ]]; then
+    echo "parse_profile_unresolved: no ranked symbols in this report" >&2
+    return 1
+  fi
+  printf '%s\n' "${rows}" | awk '
+    { total += $1; if ($2 ~ /^0x[0-9a-f]+$/ && NF == 2) unnamed += $1 }
+    END { printf "%.2f\n", (total == 0 ? 100 : 100 * unnamed / total) }'
+}
+
+# Whether the load actually covered the recording window.
+#
+# "Is the load process still alive" is the obvious check and it is not enough: a
+# background loop whose every iteration fails in milliseconds stays alive from
+# start to finish and puts nothing on the server. What matters is that
+# iterations COMPLETED and that they carried requests, both read from the load's
+# own output rather than inferred from its process state.
+#
+# The first profile taken by hand on this project failed the other way -- the
+# load finished in under a second and the server idled through the remaining
+# seven -- which is why "still running at the end" is required as well.
+profile_load_ok() { # iterations requests still_running
+  local iterations="${1:-0}" requests="${2:-0}" still_running="${3:-no}"
+  if (( iterations <= 0 )); then
+    echo "profile_load_ok: the load completed no iterations during the window" >&2
+    return 1
+  fi
+  if (( requests <= 0 )); then
+    echo "profile_load_ok: the load issued no requests during the window; it was running but not loading" >&2
+    return 1
+  fi
+  if [[ "${still_running}" != "yes" ]]; then
+    echo "profile_load_ok: the load finished before the recording window closed, so the server was idle for part of it" >&2
+    return 1
+  fi
+  return 0
+}

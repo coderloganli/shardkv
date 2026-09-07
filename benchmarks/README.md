@@ -9,9 +9,12 @@ git history is the only thing that can prove it, since no test can tell when a
 sentence was thought of.
 
 Read `docs/adr/0014-what-this-machine-can-and-cannot-measure.md` second. It says
-what is deliberately absent here and why: there is **no scaling curve and no
-profile**, because the machine is virtualised and its PMU is unreachable, and no
-claim about scaling with cores is made anywhere.
+what is deliberately absent here and why: there is **no scaling curve and
+nothing measured with a hardware counter**, because the machine is virtualised
+and its PMU is unreachable, and no claim about scaling with cores is made
+anywhere. A sampling profile needs no counters, and `profile.sh` takes one —
+what may be concluded from it is
+`docs/adr/0017-the-profile-sees-user-space-only.md`.
 
 ## Running them
 
@@ -32,6 +35,25 @@ Each script is runnable on its own and writes its own results directory.
 | `cross_shard.sh` | what an extra hop between threads costs a request |
 | `memory.sh` | resident memory after a million keys, both servers |
 | `run-all.sh` | the four of them into one directory |
+| `profile.sh` | where this server's own time goes, at eight shards under load |
+
+`profile.sh` is deliberately **not** part of `run-all.sh`. The four above compare
+two programs; this one asks what one program spends itself on, so a control
+group would only take cores from the thing being watched. It also needs `perf`
+and a relaxed syscall filter, which the others do not:
+
+```
+docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src shardkv-dev \
+  bash -c 'cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build \
+           && benchmarks/profile.sh'
+```
+
+Putting it in `run-all.sh` would make the whole suite fail by default on a
+machine without that flag, and take the smoke test down with it in all three
+builds. What the resulting profile can and cannot be used to claim is
+`docs/adr/0017-the-profile-sees-user-space-only.md`, and it matters more than
+usual here: the recording sees user-mode time only, so it ranks this program's
+own functions and cannot express a share of total time.
 
 The sizes come from the technical document's §8.1 and are overridable:
 `BENCH_REQUESTS`, `BENCH_CLIENTS`, `BENCH_SHARDS`, `BENCH_PIPELINE`,

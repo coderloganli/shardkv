@@ -13,8 +13,13 @@
 # results directory behind at all.
 #
 # Overridable for testing: BENCH_REDIS_SERVER_VERSION and
-# BENCH_REDIS_BENCHMARK_VERSION. BUILD_DIR names the build tree the compiler and
-# optimisation level are read from.
+# BENCH_REDIS_BENCHMARK_VERSION, and BENCH_CPU_PROC / BENCH_CPU_LSCPU, which
+# point the two CPU detectors at files so that a machine which CAN name its CPU
+# can still exercise the path of one that cannot. BENCH_CPU_MODEL is not a test
+# hook: it is the operator's assertion, and is documented in
+# docs/adr/0018-an-environment-field-may-be-asserted-never-guessed.md.
+# BUILD_DIR names the build tree the compiler and optimisation level are read
+# from.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +36,51 @@ emit() { # name value
   fi
 }
 
-cpu_model="$(sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo | head -1)"
+# The CPU, by assertion first and detection second.
+#
+# Assertion first is the same rule the commit hash already follows, and it is
+# one rule rather than two: a precedence that changed depending on whether
+# detection happened to succeed would be a precedence nobody could predict. The
+# operator knows what machine they are sitting at better than a guest kernel
+# does, and setting the variable is a deliberate act.
+#
+# Detection is two sources because one is not enough. `/proc/cpuinfo` carries no
+# `model name` line at all on aarch64, and `lscpu` answers "-" under a desktop
+# hypervisor that tells its guest nothing -- which is the machine this was
+# written on. Neither is a failure of the recorder; the machine genuinely cannot
+# say what it is, and the assertion exists for exactly that.
+cpu_proc="${BENCH_CPU_PROC:-/proc/cpuinfo}"
+cpu_model_asserted=no
+
+if [[ -n "${BENCH_CPU_MODEL:-}" ]]; then
+  # Checked before a single line of the block is printed. The block is
+  # `name: value` lines, so a value carrying a newline forges a field the
+  # recorder never wrote -- and a recorder that prints half a block before
+  # noticing has still put half a block somewhere a careless caller could keep.
+  if [[ "${BENCH_CPU_MODEL}" == *$'\n'* || "${BENCH_CPU_MODEL}" == *:* ]]; then
+    printf 'environment.sh: refusing BENCH_CPU_MODEL: a newline or a colon in it would forge a field\n' >&2
+    exit 1
+  fi
+  cpu_model="${BENCH_CPU_MODEL} (asserted)"
+  cpu_model_asserted=yes
+  printf 'environment.sh: cpu_model was asserted, not detected: %s\n' "${BENCH_CPU_MODEL}" >&2
+else
+  cpu_model="$(sed -n 's/^model name[[:space:]]*: *//p' "${cpu_proc}" 2>/dev/null | head -1)"
+  if [[ -z "${cpu_model}" ]]; then
+    if [[ -n "${BENCH_CPU_LSCPU:-}" ]]; then
+      lscpu_out="$(cat "${BENCH_CPU_LSCPU}" 2>/dev/null)"
+    else
+      lscpu_out="$(lscpu 2>/dev/null)"
+    fi
+    cpu_model="$(printf '%s\n' "${lscpu_out}" | sed -n 's/^Model name:[[:space:]]*//p' | head -1)"
+    # "-" and "unknown" are what a hypervisor says when it is not telling. They
+    # are placeholders, not answers, and recording one would be exactly the
+    # vague value this whole mechanism exists to keep out.
+    case "${cpu_model}" in
+      -|unknown|Unknown|UNKNOWN) cpu_model="" ;;
+    esac
+  fi
+fi
 cpu_cores="$(nproc 2>/dev/null)"
 kernel="$(uname -sr 2>/dev/null)"
 
@@ -99,6 +148,14 @@ emit date "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if (( ${#missing[@]} > 0 )); then
   printf 'environment.sh: could not determine %s\n' "${missing[*]}" >&2
   printf 'environment.sh: BUILD_DIR=%s (needs a configured build tree)\n' "${BUILD_DIR}" >&2
+  # Naming the field and stopping there leaves the person who hit this with no
+  # next step, which is how a correct refusal turns into an unusable machine.
+  for name in "${missing[@]}"; do
+    if [[ "${name}" == "cpu_model" ]]; then
+      printf 'environment.sh: this machine does not say what CPU it is. Set BENCH_CPU_MODEL to assert it;\n' >&2
+      printf 'environment.sh: the record will show the value as asserted rather than detected.\n' >&2
+    fi
+  done
   exit 1
 fi
 
